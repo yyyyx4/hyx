@@ -1,0 +1,259 @@
+
+#include "common.h"
+#include "blob.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/fcntl.h>
+#include <sys/mman.h>
+
+void blob_init(struct blob *blob)
+{
+    memset(blob, 0, sizeof(*blob));
+    history_init(&blob->undo);
+    history_init(&blob->redo);
+}
+
+void blob_replace(struct blob *blob, size_t pos, byte *data, size_t len, bool save_history)
+{
+    assert(pos + len <= blob->len);
+
+    if (save_history) {
+        history_free(&blob->redo);
+        history_save(&blob->undo, REPLACE, blob, pos, len);
+    }
+
+    if (blob->dirty)
+        for (size_t i = pos / 0x1000; i < (pos + len + 0xfff) / 0x1000; ++i)
+            blob->dirty[i / 8] |= 1 << i % 8;
+
+    memcpy(blob->data + pos, data, len);
+}
+
+void blob_insert(struct blob *blob, size_t pos, byte *data, size_t len, bool save_history)
+{
+    assert(pos <= blob->len);
+    assert(blob_can_move(blob));
+    assert(len);
+    assert(!blob->dirty); /* not implemented */
+
+    if (save_history) {
+        history_free(&blob->redo);
+        history_save(&blob->undo, INSERT, blob, pos, len);
+    }
+
+    blob->data = realloc_strict(blob->data, blob->len += len);
+
+    memmove(blob->data + pos + len, blob->data + pos, blob->len - pos - len);
+    memcpy(blob->data + pos, data, len);
+}
+
+void blob_delete(struct blob *blob, size_t pos, size_t len, bool save_history)
+{
+    assert(pos + len <= blob->len);
+    assert(blob_can_move(blob));
+    assert(len);
+    assert(!blob->dirty); /* not implemented */
+
+    if (save_history) {
+        history_free(&blob->redo);
+        history_save(&blob->undo, DELETE, blob, pos, len);
+    }
+
+    memmove(blob->data + pos, blob->data + pos + len, (blob->len -= len) - pos);
+    blob->data = realloc_strict(blob->data, blob->len);
+}
+
+void blob_free(struct blob *blob)
+{
+    free(blob->filename);
+
+    switch (blob->alloc) {
+    case BLOB_MALLOC:
+        free(blob->data);
+        break;
+    case BLOB_MMAP:
+        free(blob->dirty);
+        munmap_strict(blob->data, blob->len);
+        break;
+    }
+
+    free(blob->clipboard.data);
+
+    history_free(&blob->undo);
+    history_free(&blob->redo);
+}
+
+bool blob_can_move(struct blob *blob)
+{
+    return blob->alloc == BLOB_MALLOC;
+}
+
+bool blob_undo(struct blob *blob)
+{
+    return history_step(&blob->undo, blob, &blob->redo);
+}
+
+bool blob_redo(struct blob *blob)
+{
+    return history_step(&blob->redo, blob, &blob->undo);
+}
+
+void blob_yank(struct blob *blob, size_t pos, size_t len)
+{
+    free(blob->clipboard.data);
+    blob->clipboard.data = malloc_strict(blob->clipboard.len = len);
+    blob_read_strict(blob, pos, blob->clipboard.data, blob->clipboard.len);
+}
+
+size_t blob_paste(struct blob *blob, size_t pos, enum op_type type)
+{
+    if (!blob->clipboard.data) return 0;
+
+    switch (type) {
+    case REPLACE:
+        blob_replace(blob, pos, blob->clipboard.data, min(blob->clipboard.len, blob->len - pos), true);
+        break;
+    case INSERT:
+        blob_insert(blob, pos, blob->clipboard.data, blob->clipboard.len, true);
+        break;
+    default:
+        assert(false);
+    }
+
+    return blob->clipboard.len;
+}
+
+void blob_load(struct blob *blob, char *filename)
+{
+    struct stat st;
+    int fd;
+    void *ptr;
+
+    if (!filename)
+        return; /* We are creating a new (still unnamed) file */
+
+    blob->filename = strdup(filename);
+
+    errno = 0;
+    if (stat(filename, &st)) {
+        if (errno != ENOENT)
+            pdie("stat");
+        return; /* We are creating a new file with given name */
+    }
+
+    if (0 > (fd = open(filename, O_RDONLY)))
+        pdie("open");
+
+    switch (st.st_mode & S_IFMT) {
+    case S_IFREG:
+        blob->len = st.st_size;
+        blob->alloc = blob->len >= CONFIG_LARGE_FILESIZE ? BLOB_MMAP : BLOB_MALLOC;
+        break;
+    case S_IFBLK:
+        blob->len = lseek_strict(fd, 0, SEEK_END);
+        blob->alloc = BLOB_MMAP;
+        break;
+    default:
+        die("unsupported file type");
+    }
+
+    ptr = mmap_strict(NULL,
+            blob->len,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_NORESERVE,
+            fd,
+            0);
+
+    switch (blob->alloc) {
+
+    case BLOB_MMAP:
+        blob->data = ptr;
+        blob->dirty = calloc(((blob->len + 0xfff) / 0x1000 + 7) / 8, sizeof(*blob->dirty));
+        if (!blob->dirty)
+            pdie("calloc");
+        break;
+
+    case BLOB_MALLOC:
+        blob->data = malloc_strict(blob->len);
+        memcpy(blob->data, ptr, blob->len);
+        munmap_strict(ptr, blob->len);
+        break;
+
+    default:
+        assert(false);
+    }
+
+    if (close(fd))
+        pdie("close");
+}
+
+bool blob_save(struct blob *blob, char *filename)
+{
+    int fd;
+    byte const *ptr;
+
+    if (filename) {
+        free(blob->filename);
+        blob->filename = strdup(filename);
+    }
+    else if (blob->filename)
+        filename = blob->filename;
+    else
+        return false;
+
+    if (0 > (fd = open(filename,
+                    O_WRONLY | O_CREAT,
+                    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)))
+        pdie("open");
+
+    /* FIXME check whether fd is a block device instead of guessing */
+    if (blob_can_move(blob) && ftruncate(fd, blob->len))
+            pdie("ftruncate");
+
+    for (size_t i = 0, n; i < blob->len; i += n) {
+
+        ptr = blob_lookup(blob, i, &n);
+
+        if (blob->dirty) {
+            if (!(blob->dirty[i / 0x1000 / 8] & (1 << i / 0x1000 % 8))) {
+                if (0 > lseek(fd, n = 0x1000 - i % 0x1000, SEEK_CUR))
+                    pdie("lseek");
+                continue;
+            }
+            n = min(0x1000, n);
+        }
+
+        assert((ssize_t) i == lseek(fd, 0, SEEK_CUR));
+
+        if (0 >= (n = write(fd, ptr, n)))
+            pdie("write");
+    }
+
+    if (close(fd))
+        pdie("close");
+
+    return true;
+}
+
+byte const *blob_lookup(struct blob *blob, size_t pos, size_t *len)
+{
+    assert(pos < blob->len);
+
+    if (len)
+        *len = blob->len - pos;
+    return blob->data + pos;
+}
+
+void blob_read_strict(struct blob *blob, size_t pos, byte *buf, size_t len)
+{
+    byte const *ptr;
+    for (size_t i = 0, n; i < len; i += n) {
+        ptr = blob_lookup(blob, pos, &n);
+        memcpy(buf + i, ptr, (n = min(len - i, n)));
+    }
+}
+

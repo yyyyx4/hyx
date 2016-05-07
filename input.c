@@ -1,0 +1,527 @@
+
+#include "common.h"
+#include "blob.h"
+#include "view.h"
+#include "input.h"
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <ctype.h>
+
+void input_init(struct input *input, struct view *view)
+{
+    memset(input, 0, sizeof(*input));
+    input->view = view;
+}
+
+static int getch()
+{
+    int c;
+retry:
+    errno = 0;
+    if (EOF == (c = getc(stdin))) {
+        if (errno == EINTR)
+            goto retry;
+        pdie("getc");
+    }
+    return c;
+}
+
+static void ungetch(int c)
+{
+    if (c != ungetc(c, stdin))
+        pdie("ungetc");
+}
+
+/*
+ * The C standard forbids assigning arbitrary integers to an enum,
+ * hence we do it the other way round: assign enumerated constants
+ * to a general integer type.
+ */
+typedef uint16_t key;
+enum {
+    KEY_SPECIAL = 0x1000,
+    KEY_SPECIAL_ESCAPE,
+    KEY_SPECIAL_DELETE,
+    KEY_SPECIAL_UP, KEY_SPECIAL_DOWN, KEY_SPECIAL_RIGHT, KEY_SPECIAL_LEFT,
+    KEY_SPECIAL_PGUP, KEY_SPECIAL_PGDOWN,
+    KEY_SPECIAL_HOME, KEY_SPECIAL_END,
+};
+
+static key get_key()
+{
+    key k;
+    if (0x1b != (k = getch()))
+        return k;
+    /*
+     * FIXME
+     * This function has a hard time distinguishing the escape key from the
+     * start of an escape sequence.  To be precise, pressing the escape key
+     * once remains unnoticed by the program until a follow-up key which is
+     * not '[' is pressed.  Traditionally, this is "solved" by waiting only
+     * a short amount of time for the remainder of what might constitute an
+     * escape sequence, but since doing so would require restructuring some
+     * of this code, and (more importantly) it is still an ugly, disgusting
+     * hack, this has not been done so far.  Good ideas are highly welcome.
+     */
+    if ('[' != (k = getch())) {
+        ungetch(k);
+        return KEY_SPECIAL_ESCAPE;
+    }
+#define EXPECT(C) do { if ((C) != getch()) goto fail; } while (false)
+    switch (k = getch()) {
+    case 'A': return KEY_SPECIAL_UP;
+    case 'B': return KEY_SPECIAL_DOWN;
+    case 'C': return KEY_SPECIAL_RIGHT;
+    case 'D': return KEY_SPECIAL_LEFT;
+    case '3': EXPECT('~'); return KEY_SPECIAL_DELETE;
+    case '5': EXPECT('~'); return KEY_SPECIAL_PGUP;
+    case '6': EXPECT('~'); return KEY_SPECIAL_PGDOWN;
+    case '7': EXPECT('~'); return KEY_SPECIAL_HOME;
+    case '8': EXPECT('~'); return KEY_SPECIAL_END;
+    default: /* fall-through */
+    fail: die("unknown key");
+    }
+    return k;
+#undef EXPECT
+}
+
+static void do_reset_soft(struct input *input)
+{
+    input->low_nibble = 0;
+    input->cur_val = 0;
+}
+
+static void toggle_mode_select(struct input *input)
+{
+    struct view *V = input->view;
+    struct blob *B = V->blob;
+
+    switch (input->mode) {
+    case INPUT:
+        if (!blob_length(B))
+            break;
+        input->mode = SELECT;
+        input->sel = (input->cur -= (input->cur >= blob_length(B)));
+        view_dirty_at(V, input->cur);
+        break;
+    case SELECT:
+        input->mode = INPUT;
+        view_dirty_fromto(input->view, input->sel, input->cur + 1);
+        view_dirty_fromto(input->view, input->cur, input->sel + 1);
+        break;
+    }
+}
+
+static size_t cur_bound(struct input *input)
+{
+    size_t bound = blob_length(input->view->blob);
+    bound += !bound || (input->mode == INPUT && input->input_mode.insert);
+    return bound;
+}
+
+static void do_reset_hard(struct input *input)
+{
+    struct view *V = input->view;
+
+    do_reset_soft(input);
+    if (input->mode == SELECT)
+        toggle_mode_select(input);
+    input->input_mode.insert = false;
+    input->input_mode.ascii = false;
+    if (input->cur >= cur_bound(input))
+        input->cur = cur_bound(input) - 1;
+    view_dirty_at(V, input->cur);
+}
+
+static void cur_move_rel(struct input *input, size_t (*f)(size_t, size_t, size_t), size_t off, size_t bound)
+{
+    struct view *V = input->view;
+
+    do_reset_soft(input);
+    view_dirty_at(V, input->cur);
+    input->cur = f(input->cur, off, bound);
+    view_dirty_at(V, input->cur);
+    view_adjust(V);
+}
+
+static void cur_adjust(struct input *input)
+{
+    cur_move_rel(input, satadd, 0, cur_bound(input));
+}
+
+static void toggle_mode_insert(struct input *input)
+{
+    struct view *V = input->view;
+
+    if (!blob_can_move(V->blob)) {
+        view_error(V, "file is memory-mapped; can't insert!");
+        return;
+    }
+
+    if (input->mode != INPUT)
+        return;
+    input->input_mode.insert = !input->input_mode.insert;
+    cur_adjust(input);
+    view_dirty_at(V, input->cur);
+}
+
+static void toggle_mode_ascii(struct input *input)
+{
+    struct view *V = input->view;
+
+    if (input->mode != INPUT)
+        return;
+    input->input_mode.ascii = !input->input_mode.ascii;
+    view_dirty_at(V, input->cur);
+}
+
+static void do_yank(struct input *input)
+{
+    switch (input->mode) {
+    case INPUT:
+        input->sel = input->cur;
+        input->mode = SELECT;
+        /* fall-through */
+    case SELECT:
+        blob_yank(input->view->blob, min(input->sel, input->cur), absdiff(input->sel, input->cur) + 1);
+        toggle_mode_select(input);
+    }
+}
+
+static size_t do_paste(struct input *input)
+{
+    struct view *V = input->view;
+    struct blob *B = V->blob;
+    size_t retval;
+
+    if (input->mode != INPUT)
+        return 0;
+    view_adjust(input->view);
+    do_reset_soft(input);
+    retval = blob_paste(B, input->cur, input->input_mode.insert ? INSERT : REPLACE);
+    if (input->input_mode.insert)
+        view_dirty_from(input->view, input->cur);
+    else
+        view_dirty_fromto(input->view, input->cur, input->cur + input->view->blob->clipboard.len);
+
+    return retval;
+}
+
+static void do_delete(struct input *input)
+{
+    struct view *V = input->view;
+    struct blob *B = V->blob;
+
+    if (!blob_can_move(B)) {
+        view_error(V, "file is memory-mapped; can't delete!");
+        return;
+    }
+
+    switch (input->mode) {
+    case INPUT:
+        if (input->cur >= blob_length(B)) {
+            cur_move_rel(input, satdec, 1, 0);
+            return;
+        }
+        input->sel = input->cur;
+        input->mode = SELECT;
+        /* fall-through */
+    case SELECT:
+        do_reset_soft(input);
+        do_yank(input);
+        blob_delete(B, min(input->sel, input->cur), absdiff(input->sel, input->cur) + 1, true);
+        cur_move_rel(input, satsub, absdiff(input->sel, input->cur), 0);
+        cur_adjust(input);
+        view_dirty_from(V, input->cur);
+        view_adjust(V);
+    }
+}
+
+void input_get(struct input *input, bool *quit)
+{
+    key k;
+    byte b;
+
+    struct view *V = input->view;
+    struct blob *B = V->blob;
+
+    k = get_key();
+
+    if (input->mode == INPUT) {
+
+        if (input->input_mode.ascii && isprint(k)) {
+
+            /* ascii input */
+
+            if (!blob_length(B))
+                input->input_mode.insert = true;
+
+            b = k;
+            if (input->input_mode.insert) {
+                blob_insert(B, input->cur, &b, sizeof(b), true);
+                view_dirty_from(V, input->cur);
+            }
+            else {
+                blob_replace(B, input->cur, &b, sizeof(b), true);
+                view_dirty_at(V, input->cur);
+            }
+
+            cur_move_rel(input, satinc, 1, cur_bound(input));
+            return;
+        }
+
+        if ((k >= '0' && k <= '9') || (k >= 'a' && k <= 'f')) {
+
+            /* hex input */
+
+            if (!blob_length(B))
+                input->input_mode.insert = true;
+
+            if (input->input_mode.insert) {
+                if (!input->low_nibble)
+                    input->cur_val = 0;
+                input->cur_val |= (k > '9' ? k - 'a' + 10 : k - '0') << 4 * (input->low_nibble = !input->low_nibble);
+                if (input->low_nibble) {
+                    blob_insert(B, input->cur, &input->cur_val, sizeof(input->cur_val), true);
+//                    view_winch(V);
+                    view_dirty_from(V, input->cur);
+                }
+                else {
+                    blob_replace(B, input->cur, &input->cur_val, sizeof(input->cur_val), true);
+//                    view_winch(V);
+                    view_dirty_at(V, input->cur);
+                    cur_move_rel(input, satinc, 1, cur_bound(input));
+                    return;
+                }
+            }
+            else {
+                input->cur_val = input->cur < blob_length(B) ? blob_at(B, input->cur) : 0;
+                input->cur_val = input->cur_val & 0xf << 4 * input->low_nibble;
+                input->cur_val |= (k > '9' ? k - 'a' + 10 : k - '0') << 4 * (input->low_nibble = !input->low_nibble);
+                blob_replace(B, input->cur, &input->cur_val, sizeof(input->cur_val), true);
+                view_dirty_at(V, input->cur);
+
+                if (!input->low_nibble) {
+                    cur_move_rel(input, satinc, 1, cur_bound(input));
+                    return;
+                }
+
+            }
+
+            view_adjust(V);
+            return;
+        }
+
+    }
+
+    /* function keys */
+
+    switch (k) {
+
+    case KEY_SPECIAL_ESCAPE:
+        do_reset_hard(input);
+        break;
+
+    case 'x':
+    case KEY_SPECIAL_DELETE:
+        do_delete(input);
+        break;
+
+    case 'q':
+        *quit = true;
+        break;
+
+    case 'v':
+        toggle_mode_select(input);
+        break;
+
+    case 'y':
+        do_yank(input);
+        break;
+
+    case 's':
+        if (input->mode == SELECT && input->cur > input->sel) {
+            size_t tmp = input->sel;
+            input->sel = input->cur;
+            input->cur = tmp;
+        }
+        do_delete(input);
+        toggle_mode_insert(input);
+        break;
+
+    case 'p':
+        do_paste(input);
+        break;
+
+    case 'P': {
+            size_t tmp = do_paste(input);
+            cur_move_rel(input, satadd, tmp, cur_bound(input));
+        }
+        break;
+
+    case 'i':
+        toggle_mode_insert(input);
+        break;
+
+    case '\t':
+        toggle_mode_ascii(input);
+        break;
+
+    case 'u':
+        if (input->mode != INPUT) break;
+        if (!blob_undo(B))
+            break;
+        cur_adjust(input);
+        view_dirty_from(V, 0); /* FIXME suboptimal */
+        break;
+
+    case 0x12: /* ctrl + R */
+        if (input->mode != INPUT) break;
+        if (!blob_redo(B))
+            break;
+        cur_adjust(input);
+        view_dirty_from(V, 0); /* FIXME suboptimal */
+        break;
+
+    case 0xc: /* ctrl + L */
+        view_dirty_from(V, 0);
+        break;
+
+    case ':':
+        printf("\x1b[%uH", V->rows); /* move to last line */
+        view_text(V);
+        printf(":");
+        input_cmd(input, quit);
+        view_dirty_from(V, 0);
+        view_visual(V);
+        break;
+
+    case 'j':
+    case KEY_SPECIAL_DOWN:
+        cur_move_rel(input, satinc, V->cols, cur_bound(input));
+        break;
+
+    case 'k':
+    case KEY_SPECIAL_UP:
+        cur_move_rel(input, satdec, V->cols, 0);
+        break;
+
+    case 'h':
+    case KEY_SPECIAL_LEFT:
+        cur_move_rel(input, satdec, 1, 0);
+        break;
+
+    case 'l':
+    case KEY_SPECIAL_RIGHT:
+        cur_move_rel(input, satinc, 1, cur_bound(input));
+        break;
+
+    /* FIXME fix/unify handling of cursor movements, in particular
+     * considering the special case of an empty file */
+    case 'g':
+    case KEY_SPECIAL_HOME:
+        do_reset_soft(input);
+        view_dirty_at(V, input->cur);
+        input->cur = input->cur > V->start ? V->start : 0;
+        view_dirty_at(V, input->cur);
+        if (input->mode == SELECT) view_dirty_from(V, 0); /* FIXME suboptimal */
+        view_adjust(V);
+        break;
+
+    case 'G':
+    case KEY_SPECIAL_END:
+        do_reset_soft(input);
+        view_dirty_at(V, input->cur);
+        if (input->cur < V->start + V->rows * V->cols - 1)
+            input->cur = satadd(V->start, V->rows * V->cols - 1, cur_bound(input));
+        else
+            input->cur = cur_bound(input) - 1;
+        view_dirty_at(V, input->cur);
+        if (input->mode == SELECT) view_dirty_from(V, 0); /* FIXME suboptimal */
+        view_adjust(V);
+        break;
+
+    case KEY_SPECIAL_PGUP:
+        do_reset_soft(input);
+        input->cur = satdec(input->cur, V->rows * V->cols, 0);
+        V->start = satdec(V->start, V->rows * V->cols, 0);
+        view_dirty_from(V, 0);
+        view_adjust(V);
+        break;
+
+    case KEY_SPECIAL_PGDOWN:
+        do_reset_soft(input);
+        input->cur = satinc(input->cur, V->rows * V->cols, cur_bound(input));
+        V->start = satinc(V->start, V->rows * V->cols, cur_bound(input));
+        view_dirty_from(V, 0);
+        view_adjust(V);
+        break;
+
+    case '[':
+        view_set_cols(V, true, -1);
+        break;
+
+    case ']':
+        view_set_cols(V, true, +1);
+        break;
+
+    }
+}
+
+/* FIXME Search/replace functionality would be nice. */
+void input_cmd(struct input *input, bool *quit)
+{
+    char buf[0x100], *p;
+    unsigned long long n;
+
+    if (!fgets(buf, sizeof(buf), stdin))
+        pdie("fgets");
+
+    if ((p = strchr(buf, '\n')))
+        *p = 0;
+
+    if (!(p = strtok(buf, " ")))
+        return;
+    else if (!strcmp(p, "wq")) {
+        if (!(*quit = blob_save(input->view->blob, strtok(NULL, ""))))
+            view_error(input->view, "no filename; can't save!"); /* FIXME blob_save should return an error code */
+    }
+    else if (!strcmp(p, "w")) {
+        if (!blob_save(input->view->blob, strtok(NULL, "")))
+            view_error(input->view, "no filename; can't save!"); /* FIXME blob_save should return an error code */
+    }
+    else if (!strcmp(p, "q")) {
+        *quit = true;
+    }
+    else if (!strcmp(p, "color")) {
+        if ((p = strtok(NULL, " ")))
+            input->view->color = *p == '1' || *p == 'y';
+    }
+    else if (!strcmp(p, "columns")) {
+        if ((p = strtok(NULL, " "))) {
+            if (!strcmp(p, "auto")) {
+                view_set_cols(input->view, false, 0);
+            }
+            else {
+                n = strtoull(p, &p, 0);
+                if (!*p)
+                    view_set_cols(input->view, false, n);
+            }
+        }
+    }
+    else {
+        /* try to interpret the input as an offset */
+        n = strtoull(p, &p, 0);
+        if (!*p) {
+            view_dirty_at(input->view, input->cur);
+            if (n < cur_bound(input))
+                input->cur = n;
+            view_dirty_at(input->view, input->cur);
+            view_adjust(input->view);
+        }
+    }
+}
+
