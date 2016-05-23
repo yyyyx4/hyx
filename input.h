@@ -19,12 +19,17 @@ struct input {
     bool low_nibble;
     byte cur_val;
 
+    struct {
+        size_t len;
+        byte *needle;
+    } search;
+
     bool quit;
 };
 
 void input_init(struct input *input, struct view *view);
+void input_free(struct input *input);
 
 void input_get(struct input *input, bool *quit);
-void input_cmd(struct input *input, bool *quit);
 
 #endif

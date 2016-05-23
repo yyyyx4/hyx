@@ -26,7 +26,7 @@ static void diff_apply(struct blob *blob, struct diff *diff)
         blob_delete(blob, diff->pos, diff->len, false);
         break;
     default:
-        assert(false);
+        die("unknown operation");
     }
 }
 
@@ -68,7 +68,7 @@ void history_save(struct diff **history, enum op_type type, struct blob *blob, s
         diff->data = NULL;
         break;
     default:
-        assert(false);
+        die("unknown operation");
     }
 
     *history = diff;

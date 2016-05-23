@@ -121,17 +121,47 @@ size_t blob_paste(struct blob *blob, size_t pos, enum op_type type)
         blob_insert(blob, pos, blob->clipboard.data, blob->clipboard.len, true);
         break;
     default:
-        assert(false);
+        die("bad operation");
     }
 
     return blob->clipboard.len;
+}
+
+ssize_t blob_search(struct blob *blob, byte const *needle, size_t len, size_t start, ssize_t end, ssize_t dir)
+{
+    if (!blob_length(blob) || !len)
+        return -1;
+
+    assert(start < blob_length(blob));
+    assert(end < 0 || (size_t) end < blob_length(blob));
+    assert((size_t) labs(dir) == 1);
+
+    for (size_t i = start; ; ) {
+
+        if (end >= 0 && i == (size_t) end)
+            break;
+
+        if (i + len <= blob_length(blob)) {
+            /* FIXME use a real search algorithm */
+            bool found = true;
+            for (size_t j = 0; found && j < len; ++j)
+                found = blob_at(blob, i + j) == needle[j];
+            if (found)
+                return i;
+        }
+
+        if (start == (i = (i + blob_length(blob) + dir) % blob_length(blob)))
+            break;
+    }
+
+    return -1;
 }
 
 void blob_load(struct blob *blob, char *filename)
 {
     struct stat st;
     int fd;
-    void *ptr;
+    void *ptr = NULL;
 
     if (!filename)
         return; /* We are creating a new (still unnamed) file */
@@ -161,16 +191,18 @@ void blob_load(struct blob *blob, char *filename)
         die("unsupported file type");
     }
 
-    ptr = mmap_strict(NULL,
-            blob->len,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_NORESERVE,
-            fd,
-            0);
+    if (blob->len)
+        ptr = mmap_strict(NULL,
+                blob->len,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_NORESERVE,
+                fd,
+                0);
 
     switch (blob->alloc) {
 
     case BLOB_MMAP:
+        assert(ptr);
         blob->data = ptr;
         blob->dirty = calloc(((blob->len + 0xfff) / 0x1000 + 7) / 8, sizeof(*blob->dirty));
         if (!blob->dirty)
@@ -180,11 +212,12 @@ void blob_load(struct blob *blob, char *filename)
     case BLOB_MALLOC:
         blob->data = malloc_strict(blob->len);
         memcpy(blob->data, ptr, blob->len);
-        munmap_strict(ptr, blob->len);
+        if (ptr)
+            munmap_strict(ptr, blob->len);
         break;
 
     default:
-        assert(false);
+        die("bad blob type");
     }
 
     if (close(fd))

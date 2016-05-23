@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <stdio.h>
 
 unsigned long bit_length(unsigned long n)
 {
@@ -49,6 +50,19 @@ off_t lseek_strict(int fildes, off_t offset, int whence)
     off_t ret;
     if (0 >= (ret = lseek(fildes, offset, whence)))
         pdie("lseek");
+    return ret;
+}
+
+char *fgets_retry(char *s, int size, FILE *stream)
+{
+    char *ret;
+retry:
+    errno = 0;
+    if (!(ret = fgets(s, size, stream))) {
+        if (errno == EINTR)
+            goto retry;
+        pdie("fgets");
+    }
     return ret;
 }
 

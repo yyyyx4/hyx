@@ -12,9 +12,11 @@ enum blob_alloc {
 struct blob {
     enum blob_alloc alloc;
 
-    char *filename;
     size_t len;
     byte *data;
+
+    char *filename;
+
     uint8_t *dirty;
 
     struct diff *undo, *redo;
@@ -38,6 +40,8 @@ bool blob_redo(struct blob *blob);
 
 void blob_yank(struct blob *blob, size_t pos, size_t len);
 size_t blob_paste(struct blob *blob, size_t pos, enum op_type type);
+
+ssize_t blob_search(struct blob *blob, byte const *needle, size_t len, size_t start, ssize_t end, ssize_t dir);
 
 void blob_load(struct blob *blob, char *filename);
 bool blob_save(struct blob *blob, char *filename);

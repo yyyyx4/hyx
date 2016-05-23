@@ -2,7 +2,7 @@
  *
  * Copyright (c) 2016 Lorenz Panny
  *
- * This is hyx version 0.1 (7 May 2016).
+ * This is hyx version 0.1.1 (23 May 2016).
  * Check for newer versions at https://home.in.tum.de/~panny.
  * Please report bugs to lorenz.panny@tum.de.
  *
@@ -52,13 +52,13 @@ static void sighdlr(int num)
         quit = true;
         break;
     default:
-        assert(false);
+        die("unrecognized signal");
     }
 }
 
 __attribute__((noreturn)) void version()
 {
-    printf("This is hyx version 0.1 (7 May 2016).\n");
+    printf("This is hyx version 0.1.1 (23 May 2016).\n");
     exit(0);
 }
 
@@ -102,6 +102,8 @@ __attribute__((noreturn)) void help(int st)
     printf("G               jump to end of screen or file\n");
     printf("\n");
     printf(":               enter command\n");
+    printf("/x (hex string) search for hexadecimal bytes\n");
+    printf("/s (characters) search for ascii string\n");
     printf("\n");
 
     printf("    %scommands:%s\n\n",
@@ -162,6 +164,7 @@ int main(int argc, char **argv)
     printf("\x1b[2J"); /* clrscr() */
     view_text(&view);
 
+    input_free(&input);
     view_free(&view);
     blob_free(&blob);
 }

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <assert.h>
 #include <unistd.h>
 
@@ -19,8 +20,8 @@
 
 typedef uint8_t byte;
 
-void die(char const *s); /* hyx.c */
-void pdie(char const *s); /* hyx.c */
+void die(char const *s) __attribute__((noreturn)); /* hyx.c */
+void pdie(char const *s) __attribute__((noreturn)); /* hyx.c */
 
 static inline size_t min(size_t x, size_t y)
     { return x < y ? x : y; }
@@ -47,5 +48,7 @@ void *mmap_strict(void *addr, size_t len, int prot, int flags, int fildes, off_t
 void munmap_strict(void *addr, size_t len);
 
 off_t lseek_strict(int fildes, off_t offset, int whence);
+
+char *fgets_retry(char *s, int size, FILE *stream);
 
 #endif

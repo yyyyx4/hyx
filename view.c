@@ -308,6 +308,7 @@ void view_adjust(struct view *view)
     assert(view->input->cur >= view->start);
     assert(view->input->cur < view_end(view));
 
+    /* scrolling */
     if (view->start != old_start) {
         if (!(((ssize_t) view->start - (ssize_t) old_start) % (ssize_t) view->cols)) {
             view->scroll = ((ssize_t) view->start - (ssize_t) old_start) / (ssize_t) view->cols;
@@ -319,18 +320,20 @@ void view_adjust(struct view *view)
             if (view->scroll > 0) {
                 memmove(
                         view->dirty,
-                        view->dirty + view->scroll * sizeof(*view->dirty),
+                        view->dirty + view->scroll,
                         (view->rows - view->scroll) * sizeof(*view->dirty)
                 );
-                memset(view->dirty + view->scroll, 1, (view->rows - view->scroll) * sizeof(*view->dirty));
+                for (size_t i = view->rows - view->scroll; i < view->rows; ++i)
+                    view->dirty[i] = 1;
             }
             else {
                 memmove(
-                        view->dirty + (-view->scroll) * sizeof(*view->dirty),
+                        view->dirty + (-view->scroll),
                         view->dirty,
                         (view->rows - (-view->scroll)) * sizeof(*view->dirty)
                 );
-                memset(view->dirty, 1, (-view->scroll) * sizeof(*view->dirty));
+                for (size_t i = 0; i < (size_t) -view->scroll; ++i)
+                    view->dirty[i] = 1;
             }
         }
         else

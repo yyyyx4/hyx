@@ -16,6 +16,11 @@ void input_init(struct input *input, struct view *view)
     input->view = view;
 }
 
+void input_free(struct input *input)
+{
+    free(input->search.needle);
+}
+
 static int getch()
 {
     int c;
@@ -136,6 +141,7 @@ static void do_reset_hard(struct input *input)
     view_dirty_at(V, input->cur);
 }
 
+/* FIXME implement cur_move_abs with dirtiness updates when selecting, etc. */
 static void cur_move_rel(struct input *input, size_t (*f)(size_t, size_t, size_t), size_t off, size_t bound)
 {
     struct view *V = input->view;
@@ -240,6 +246,25 @@ static void do_delete(struct input *input)
     }
 }
 
+static void do_search_cont(struct input *input, ssize_t dir)
+{
+    struct view *V = input->view;
+    struct blob *B = V->blob;
+    ssize_t pos = blob_search(B, input->search.needle, input->search.len,
+            (input->cur + blob_length(B) + dir) % blob_length(B), -1, dir);
+
+    if (pos < 0)
+        return;
+
+    view_dirty_at(V, input->cur);
+    input->cur = pos;
+    view_dirty_at(V, input->cur);
+    view_adjust(V);
+}
+
+void input_cmd(struct input *input, bool *quit);
+void input_search(struct input *input);
+
 void input_get(struct input *input, bool *quit)
 {
     key k;
@@ -331,6 +356,8 @@ void input_get(struct input *input, bool *quit)
         break;
 
     case 'q':
+        /* FIXME enable this warning */
+//        view_error(input->view, "unsaved changes; please use :q if you are sure.");
         *quit = true;
         break;
 
@@ -397,6 +424,23 @@ void input_get(struct input *input, bool *quit)
         input_cmd(input, quit);
         view_dirty_from(V, 0);
         view_visual(V);
+        break;
+
+    case '/':
+        printf("\x1b[%uH", V->rows); /* move to last line */
+        view_text(V);
+        printf("/");
+        input_search(input);
+        view_dirty_from(V, 0);
+        view_visual(V);
+        break;
+
+    case 'n':
+        do_search_cont(input, 1);
+        break;
+
+    case 'N':
+        do_search_cont(input, -1);
         break;
 
     case 'j':
@@ -471,13 +515,12 @@ void input_get(struct input *input, bool *quit)
     }
 }
 
-/* FIXME Search/replace functionality would be nice. */
 void input_cmd(struct input *input, bool *quit)
 {
     char buf[0x100], *p;
     unsigned long long n;
 
-    if (!fgets(buf, sizeof(buf), stdin))
+    if (!fgets_retry(buf, sizeof(buf), stdin))
         pdie("fgets");
 
     if ((p = strchr(buf, '\n')))
@@ -486,11 +529,11 @@ void input_cmd(struct input *input, bool *quit)
     if (!(p = strtok(buf, " ")))
         return;
     else if (!strcmp(p, "wq")) {
-        if (!(*quit = blob_save(input->view->blob, strtok(NULL, ""))))
+        if (!(*quit = blob_save(input->view->blob, strtok(NULL, " "))))
             view_error(input->view, "no filename; can't save!"); /* FIXME blob_save should return an error code */
     }
     else if (!strcmp(p, "w")) {
-        if (!blob_save(input->view->blob, strtok(NULL, "")))
+        if (!blob_save(input->view->blob, strtok(NULL, " ")))
             view_error(input->view, "no filename; can't save!"); /* FIXME blob_save should return an error code */
     }
     else if (!strcmp(p, "q")) {
@@ -523,5 +566,75 @@ void input_cmd(struct input *input, bool *quit)
             view_adjust(input->view);
         }
     }
+}
+
+static unsigned unhex_digit(char c)
+{
+    assert(isxdigit(c));
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    else if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    die("not a hex digit");
+}
+
+static size_t unhex(byte **ret, char const *hex)
+{
+    size_t len = 0;
+    *ret = malloc_strict(strlen(hex) / 2);
+    for (char const *p = hex; *p; ) {
+        while (isspace(*p)) ++p;
+        if (!(isxdigit(p[0]) && isxdigit(p[1]))) {
+            free(*ret);
+            *ret = NULL;
+            return 0;
+        }
+        (*ret)[len] = unhex_digit(*p++) << 4;
+        (*ret)[len++] |= unhex_digit(*p++);
+    }
+    /* shrink to what we actually needed */
+    *ret = realloc_strict(*ret, len);
+    return len;
+}
+
+
+void input_search(struct input *input)
+{
+    char buf[0x100], *p, *q;
+
+    if (!fgets_retry(buf, sizeof(buf), stdin))
+        pdie("fgets");
+
+    if ((p = strchr(buf, '\n')))
+        *p = 0;
+
+    input->search.len = 0;
+    free(input->search.needle);
+    input->search.needle = NULL;
+
+    if (!(p = strtok(buf, " ")))
+        return;
+    else if (!strcmp(p, "x")) {
+        if (!(q = strtok(NULL, " "))) {
+            q = p;
+            goto str;
+        }
+        input->search.len = unhex(&input->search.needle, q);
+    }
+    else if (!strcmp(p, "s")) {
+        if (!(q = strtok(NULL, " ")))
+            q = p;
+str:
+        input->search.len = strlen(q);
+        input->search.needle = (byte *) strdup(q);
+    }
+    else if (!(input->search.len = unhex(&input->search.needle, p))) {
+        q = p;
+        goto str;
+    }
+
+    do_search_cont(input, 1);
 }
 
