@@ -9,6 +9,12 @@
 #include <string.h>
 #include <errno.h>
 #include <ctype.h>
+#include <setjmp.h>
+
+#include <time.h>
+#include <sys/time.h>
+
+extern jmp_buf jmp_mainloop; /* hyx.c */
 
 void input_init(struct input *input, struct view *view)
 {
@@ -21,14 +27,28 @@ void input_free(struct input *input)
     free(input->search.needle);
 }
 
-static int getch()
+/*
+ * The C standard forbids assigning arbitrary integers to an enum,
+ * hence we do it the other way round: assign enumerated constants
+ * to a general integer type.
+ */
+typedef uint16_t key;
+enum {
+    KEY_INTERRUPTED = 0x1000,
+    KEY_SPECIAL_ESCAPE,
+    KEY_SPECIAL_DELETE,
+    KEY_SPECIAL_UP, KEY_SPECIAL_DOWN, KEY_SPECIAL_RIGHT, KEY_SPECIAL_LEFT,
+    KEY_SPECIAL_PGUP, KEY_SPECIAL_PGDOWN,
+    KEY_SPECIAL_HOME, KEY_SPECIAL_END,
+};
+
+static key getch()
 {
     int c;
-retry:
     errno = 0;
     if (EOF == (c = getc(stdin))) {
         if (errno == EINTR)
-            goto retry;
+            return KEY_INTERRUPTED;
         pdie("getc");
     }
     return c;
@@ -40,57 +60,107 @@ static void ungetch(int c)
         pdie("ungetc");
 }
 
-/*
- * The C standard forbids assigning arbitrary integers to an enum,
- * hence we do it the other way round: assign enumerated constants
- * to a general integer type.
- */
-typedef uint16_t key;
-enum {
-    KEY_SPECIAL = 0x1000,
-    KEY_SPECIAL_ESCAPE,
-    KEY_SPECIAL_DELETE,
-    KEY_SPECIAL_UP, KEY_SPECIAL_DOWN, KEY_SPECIAL_RIGHT, KEY_SPECIAL_LEFT,
-    KEY_SPECIAL_PGUP, KEY_SPECIAL_PGDOWN,
-    KEY_SPECIAL_HOME, KEY_SPECIAL_END,
-};
-
 static key get_key()
 {
+    static const struct itimerval timeout = {{0}, {CONFIG_WAIT_ESCAPE / 1000000, CONFIG_WAIT_ESCAPE % 1000000}};
+
+    /* FIXME Perhaps it'd be easier to just memorize everything after an escape
+     * key until the timeout hits and parse it once we got the whole sequence? */
+    static enum {
+        none,
+        discard,
+        have_escape,
+        have_bracket,
+        need_tilde,
+    } state = none;
+    static key r;
+    static struct timespec last;
+
+    struct timespec cur;
     key k;
-    if (0x1b != (k = getch()))
-        return k;
-    /*
-     * FIXME
-     * This function has a hard time distinguishing the escape key from the
-     * start of an escape sequence.  To be precise, pressing the escape key
-     * once remains unnoticed by the program until a follow-up key which is
-     * not '[' is pressed.  Traditionally, this is "solved" by waiting only
-     * a short amount of time for the remainder of what might constitute an
-     * escape sequence, but since doing so would require restructuring some
-     * of this code, and (more importantly) it is still an ugly, disgusting
-     * hack, this has not been done so far.  Good ideas are highly welcome.
-     */
-    if ('[' != (k = getch())) {
-        ungetch(k);
-        return KEY_SPECIAL_ESCAPE;
+
+    /* If we already saw an escape key and we're at the beginning of the
+     * function again, it is likely we were interrupted by the timer.
+     * Check if we've waited long enough for the rest of an escape sequence;
+     * if yes, we either return the escape key or stop discarding input. */
+
+    if (state == have_escape || state == discard) {
+
+        if (clock_gettime(CLOCK_MONOTONIC, &cur)) pdie("clock_gettime");
+
+        if (CONFIG_WAIT_ESCAPE <= (cur.tv_sec - last.tv_sec) * 1000000 + (cur.tv_nsec - last.tv_nsec) / 1000) {
+            switch (state) {
+            case have_escape:
+                state = none;
+                return KEY_SPECIAL_ESCAPE;
+            case discard:
+                state = none;
+                break;
+            default:
+                die("unexpected state");
+            }
+        }
     }
-#define EXPECT(C) do { if ((C) != getch()) goto fail; } while (false)
-    switch (k = getch()) {
-    case 'A': return KEY_SPECIAL_UP;
-    case 'B': return KEY_SPECIAL_DOWN;
-    case 'C': return KEY_SPECIAL_RIGHT;
-    case 'D': return KEY_SPECIAL_LEFT;
-    case '3': EXPECT('~'); return KEY_SPECIAL_DELETE;
-    case '5': EXPECT('~'); return KEY_SPECIAL_PGUP;
-    case '6': EXPECT('~'); return KEY_SPECIAL_PGDOWN;
-    case '7': EXPECT('~'); return KEY_SPECIAL_HOME;
-    case '8': EXPECT('~'); return KEY_SPECIAL_END;
-    default: /* fall-through */
-    fail: die("unknown key");
+
+next:
+
+    /* This might be a window size change or a timer interrupt, so we need to
+     * go up to the main loop.  The state machine is untouched by this; we
+     * can simply continue where we were as soon as we're called again. */
+    if ((k = getch()) == KEY_INTERRUPTED)
+        longjmp(jmp_mainloop, 0);
+
+    switch (state) {
+
+    case none:
+        if (k != 0x1b)
+            return k;
+        state = have_escape;
+
+start_timer:
+        if (clock_gettime(CLOCK_MONOTONIC, &last)) pdie("clock_gettime");
+        setitimer(ITIMER_REAL, &timeout, NULL);
+        goto next;
+
+    case discard:
+        goto next;
+
+    case have_escape:
+        if (k != '[') {
+            ungetch(k);
+            state = none;
+            return KEY_SPECIAL_ESCAPE;
+        }
+        state = have_bracket;
+        goto next;
+
+    case have_bracket:
+        switch (k) {
+        case 'A': state = none; return KEY_SPECIAL_UP;
+        case 'B': state = none; return KEY_SPECIAL_DOWN;
+        case 'C': state = none; return KEY_SPECIAL_RIGHT;
+        case 'D': state = none; return KEY_SPECIAL_LEFT;
+        case '3': state = need_tilde; r = KEY_SPECIAL_DELETE; goto next;
+        case '5': state = need_tilde; r = KEY_SPECIAL_PGUP; goto next;
+        case '6': state = need_tilde; r = KEY_SPECIAL_PGDOWN; goto next;
+        case '7': state = need_tilde; r = KEY_SPECIAL_HOME; goto next;
+        case '8': state = need_tilde; r = KEY_SPECIAL_END; goto next;
+        default:
+discard_sequence:
+              /* We don't know this one. Enter discarding state and
+               * wait for all the characters to come in. */
+              state = discard;
+              goto start_timer;
+        }
+
+    case need_tilde:
+        if (k != '~')
+            goto discard_sequence;
+        state = none;
+        return r;
     }
-    return k;
-#undef EXPECT
+
+    __builtin_unreachable();
 }
 
 static void do_reset_soft(struct input *input)
@@ -136,12 +206,12 @@ static void do_reset_hard(struct input *input)
         toggle_mode_select(input);
     input->input_mode.insert = false;
     input->input_mode.ascii = false;
+    view_dirty_at(V, input->cur);
     if (input->cur >= cur_bound(input))
         input->cur = cur_bound(input) - 1;
     view_dirty_at(V, input->cur);
 }
 
-/* FIXME implement cur_move_abs with dirtiness updates when selecting, etc. */
 static void cur_move_rel(struct input *input, size_t (*f)(size_t, size_t, size_t), size_t off, size_t bound)
 {
     struct view *V = input->view;
@@ -163,7 +233,7 @@ static void toggle_mode_insert(struct input *input)
     struct view *V = input->view;
 
     if (!blob_can_move(V->blob)) {
-        view_error(V, "file is memory-mapped; can't insert!");
+        view_error(V, "can't insert: file is memory-mapped.");
         return;
     }
 
@@ -222,7 +292,7 @@ static void do_delete(struct input *input)
     struct blob *B = V->blob;
 
     if (!blob_can_move(B)) {
-        view_error(V, "file is memory-mapped; can't delete!");
+        view_error(V, "can't delete: file is memory-mapped.");
         return;
     }
 
@@ -260,6 +330,23 @@ static void do_search_cont(struct input *input, ssize_t dir)
     input->cur = pos;
     view_dirty_at(V, input->cur);
     view_adjust(V);
+}
+
+static void do_inc_dec(struct input *input, byte diff)
+{
+    struct view *V = input->view;
+    struct blob *B = V->blob;
+
+    /* FIXME should we do anything for selections? */
+    if (input->mode != INPUT)
+        return;
+
+    if (input->cur >= blob_length(B))
+        return;
+
+    byte b = blob_at(B, input->cur) + diff;
+    blob_replace(input->view->blob, input->cur, &b, 1, true);
+    view_dirty_at(V, input->cur);
 }
 
 void input_cmd(struct input *input, bool *quit);
@@ -356,8 +443,8 @@ void input_get(struct input *input, bool *quit)
         break;
 
     case 'q':
-        /* FIXME enable this warning */
-//        view_error(input->view, "unsaved changes; please use :q if you are sure.");
+        /* FIXME implement this warning */
+//        view_error(input->view, "unsaved changes! please use :q if you are sure.");
         *quit = true;
         break;
 
@@ -443,6 +530,14 @@ void input_get(struct input *input, bool *quit)
         do_search_cont(input, -1);
         break;
 
+    case 0x1: /* ctrl + A */
+        do_inc_dec(input, 1);
+        break;
+
+    case 0x18: /* ctrl + X */
+        do_inc_dec(input, -1);
+        break;
+
     case 'j':
     case KEY_SPECIAL_DOWN:
         cur_move_rel(input, satinc, V->cols, cur_bound(input));
@@ -488,18 +583,27 @@ void input_get(struct input *input, bool *quit)
         view_adjust(V);
         break;
 
+    case 0x15: /* ctrl + U */
     case KEY_SPECIAL_PGUP:
         do_reset_soft(input);
-        input->cur = satdec(input->cur, V->rows * V->cols, 0);
-        V->start = satdec(V->start, V->rows * V->cols, 0);
+        if (cur_bound(input) < V->rows * V->cols) {
+            V->start = 0;
+        }
+        else {
+            input->cur = satsubstep(input->cur, V->rows, V->cols, 0);
+            V->start = satsubstep(V->start, V->rows, V->cols, 0);
+        }
         view_dirty_from(V, 0);
         view_adjust(V);
         break;
 
+    case 0x4: /* ctrl + D */
     case KEY_SPECIAL_PGDOWN:
         do_reset_soft(input);
-        input->cur = satinc(input->cur, V->rows * V->cols, cur_bound(input));
-        V->start = satinc(V->start, V->rows * V->cols, cur_bound(input));
+        if (cur_bound(input) < V->rows * V->cols)
+            break;
+        input->cur = sataddstep(input->cur, V->rows, V->cols, cur_bound(input));
+        V->start = sataddstep(V->start, V->rows, V->cols, satsub(cur_bound(input), (V->rows - 1) * V->cols, 0));
         view_dirty_from(V, 0);
         view_adjust(V);
         break;
@@ -528,13 +632,24 @@ void input_cmd(struct input *input, bool *quit)
 
     if (!(p = strtok(buf, " ")))
         return;
-    else if (!strcmp(p, "wq")) {
-        if (!(*quit = blob_save(input->view->blob, strtok(NULL, " "))))
-            view_error(input->view, "no filename; can't save!"); /* FIXME blob_save should return an error code */
-    }
-    else if (!strcmp(p, "w")) {
-        if (!blob_save(input->view->blob, strtok(NULL, " ")))
-            view_error(input->view, "no filename; can't save!"); /* FIXME blob_save should return an error code */
+    else if (!strcmp(p, "w") || !strcmp(p, "wq")) {
+        switch (blob_save(input->view->blob, strtok(NULL, " "))) {
+        case BLOB_SAVE_OK:
+            if (!strcmp(p, "wq"))
+                *quit = true;
+            break;
+        case BLOB_SAVE_FILENAME:
+            view_error(input->view, "can't save: no filename.");
+            break;
+        case BLOB_SAVE_NONEXISTENT:
+            view_error(input->view, "can't save: nonexistent path.");
+            break;
+        case BLOB_SAVE_PERMISSIONS:
+            view_error(input->view, "can't save: insufficient permissions.");
+            break;
+        default:
+            die("can't save: unknown error");
+        }
     }
     else if (!strcmp(p, "q")) {
         *quit = true;

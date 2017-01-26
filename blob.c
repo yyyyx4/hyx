@@ -17,7 +17,7 @@ void blob_init(struct blob *blob)
     history_init(&blob->redo);
 }
 
-void blob_replace(struct blob *blob, size_t pos, byte *data, size_t len, bool save_history)
+void blob_replace(struct blob *blob, size_t pos, byte const *data, size_t len, bool save_history)
 {
     assert(pos + len <= blob->len);
 
@@ -33,7 +33,7 @@ void blob_replace(struct blob *blob, size_t pos, byte *data, size_t len, bool sa
     memcpy(blob->data + pos, data, len);
 }
 
-void blob_insert(struct blob *blob, size_t pos, byte *data, size_t len, bool save_history)
+void blob_insert(struct blob *blob, size_t pos, byte const *data, size_t len, bool save_history)
 {
     assert(pos <= blob->len);
     assert(blob_can_move(blob));
@@ -87,7 +87,7 @@ void blob_free(struct blob *blob)
     history_free(&blob->redo);
 }
 
-bool blob_can_move(struct blob *blob)
+bool blob_can_move(struct blob const *blob)
 {
     return blob->alloc == BLOB_MALLOC;
 }
@@ -105,8 +105,12 @@ bool blob_redo(struct blob *blob)
 void blob_yank(struct blob *blob, size_t pos, size_t len)
 {
     free(blob->clipboard.data);
-    blob->clipboard.data = malloc_strict(blob->clipboard.len = len);
-    blob_read_strict(blob, pos, blob->clipboard.data, blob->clipboard.len);
+    blob->clipboard.data = NULL;
+
+    if (pos < blob_length(blob)) {
+        blob->clipboard.data = malloc_strict(blob->clipboard.len = len);
+        blob_read_strict(blob, pos, blob->clipboard.data, blob->clipboard.len);
+    }
 }
 
 size_t blob_paste(struct blob *blob, size_t pos, enum op_type type)
@@ -157,7 +161,7 @@ ssize_t blob_search(struct blob *blob, byte const *needle, size_t len, size_t st
     return -1;
 }
 
-void blob_load(struct blob *blob, char *filename)
+void blob_load(struct blob *blob, char const *filename)
 {
     struct stat st;
     int fd;
@@ -211,9 +215,10 @@ void blob_load(struct blob *blob, char *filename)
 
     case BLOB_MALLOC:
         blob->data = malloc_strict(blob->len);
-        memcpy(blob->data, ptr, blob->len);
-        if (ptr)
+        if (ptr) {
+            memcpy(blob->data, ptr, blob->len);
             munmap_strict(ptr, blob->len);
+        }
         break;
 
     default:
@@ -224,9 +229,10 @@ void blob_load(struct blob *blob, char *filename)
         pdie("close");
 }
 
-bool blob_save(struct blob *blob, char *filename)
+enum blob_save_error blob_save(struct blob *blob, char const *filename)
 {
     int fd;
+    struct stat st;
     byte const *ptr;
 
     if (filename) {
@@ -236,15 +242,26 @@ bool blob_save(struct blob *blob, char *filename)
     else if (blob->filename)
         filename = blob->filename;
     else
-        return false;
+        return BLOB_SAVE_FILENAME;
 
+    errno = 0;
     if (0 > (fd = open(filename,
                     O_WRONLY | O_CREAT,
-                    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)))
-        pdie("open");
+                    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))) {
+        switch (errno) {
+        case ENOENT:
+            return BLOB_SAVE_NONEXISTENT;
+        case EACCES:
+            return BLOB_SAVE_PERMISSIONS;
+        default:
+            pdie("open");
+        }
+    }
 
-    /* FIXME check whether fd is a block device instead of guessing */
-    if (blob_can_move(blob) && ftruncate(fd, blob->len))
+    if (fstat(fd, &st))
+        pdie("fstat");
+
+    if ((st.st_mode & S_IFMT) == S_IFREG && ftruncate(fd, blob->len))
             pdie("ftruncate");
 
     for (size_t i = 0, n; i < blob->len; i += n) {
@@ -269,10 +286,10 @@ bool blob_save(struct blob *blob, char *filename)
     if (close(fd))
         pdie("close");
 
-    return true;
+    return BLOB_SAVE_OK;
 }
 
-byte const *blob_lookup(struct blob *blob, size_t pos, size_t *len)
+byte const *blob_lookup(struct blob const *blob, size_t pos, size_t *len)
 {
     assert(pos < blob->len);
 

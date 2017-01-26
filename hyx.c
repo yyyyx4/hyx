@@ -1,8 +1,8 @@
 /*
  *
- * Copyright (c) 2016 Lorenz Panny
+ * Copyright (c) 2016-2017 Lorenz Panny
  *
- * This is hyx version 0.1.1 (23 May 2016).
+ * This is hyx version 0.1.2 (26 Jan 2017).
  * Check for newer versions at https://home.in.tum.de/~panny.
  * Please report bugs to lorenz.panny@tum.de.
  *
@@ -14,11 +14,13 @@
 #include "blob.h"
 #include "view.h"
 #include "input.h"
+#include "ansi.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
+#include <setjmp.h>
 
 
 struct blob blob;
@@ -27,19 +29,21 @@ struct input input;
 
 bool quit;
 
+jmp_buf jmp_mainloop;
+
 
 void die(char const *s)
 {
     fprintf(stderr, "%s\n", s);
     view_text(&view);
-    exit(1);
+    exit(EXIT_FAILURE);
 }
 
 void pdie(char const *s)
 {
     perror(s);
     view_text(&view);
-    exit(1);
+    exit(EXIT_FAILURE);
 }
 
 static void sighdlr(int num)
@@ -48,8 +52,12 @@ static void sighdlr(int num)
     case SIGWINCH:
         view.winch = true;
         break;
+    case SIGALRM:
+        /* This is required to parse escape sequences,
+         * but we don't need to do anything here. */
+        break;
     case SIGINT:
-        quit = true;
+        /* ignore */
         break;
     default:
         die("unrecognized signal");
@@ -58,8 +66,8 @@ static void sighdlr(int num)
 
 __attribute__((noreturn)) void version()
 {
-    printf("This is hyx version 0.1.1 (23 May 2016).\n");
-    exit(0);
+    printf("This is hyx version 0.1.2 (26 Jan 2017).\n");
+    exit(EXIT_SUCCESS);
 }
 
 __attribute__((noreturn)) void help(int st)
@@ -68,14 +76,14 @@ __attribute__((noreturn)) void help(int st)
 
     printf("\n");
     printf("    %shyx: a minimalistic hex editor%s\n",
-            tty ? "\x1b[32m" : "", tty ? "\x1b[0m" : "");
+            tty ? color_green : "", tty ? color_normal : "");
     printf("    ------------------------------\n\n");
 
     printf("    %sinvocation:%s hyx [$filename]\n\n",
-            tty ? "\x1b[33m" : "", tty ? "\x1b[0m" : "");
+            tty ? color_yellow : "", tty ? color_normal : "");
 
     printf("    %skeys:%s\n\n",
-            tty ? "\x1b[33m" : "", tty ? "\x1b[0m" : "");
+            tty ? color_yellow : "", tty ? color_normal : "");
     printf("q               quit\n");
     printf("\n");
     printf("h, j, k, l      move cursor\n");
@@ -95,19 +103,20 @@ __attribute__((noreturn)) void help(int st)
     printf("p               paste\n");
     printf("P               paste and move cursor\n");
     printf("\n");
-    printf("[               decrement number of columns\n");
-    printf("]               increment number of columns\n");
+    printf("], [            increment/decrement number of columns\n");
     printf("\n");
-    printf("g               jump to start of screen or file\n");
-    printf("G               jump to end of screen or file\n");
+    printf("ctrl+u, ctrl+d  scroll up/down one page\n");
+    printf("g, G            jump to start/end of screen or file\n");
     printf("\n");
-    printf(":               enter command\n");
+    printf(":               enter command (see below)\n");
     printf("/x (hex string) search for hexadecimal bytes\n");
     printf("/s (characters) search for ascii string\n");
     printf("\n");
+    printf("ctrl+a, ctrl+x  increment/decrement current byte\n");
+    printf("\n");
 
     printf("    %scommands:%s\n\n",
-            tty ? "\x1b[33m" : "", tty ? "\x1b[0m" : "");
+            tty ? color_yellow : "", tty ? color_normal : "");
     printf("$offset         jump to offset (supports hex/dec/oct)\n");
     printf("q               quit\n");
     printf("w [$filename]   save\n");
@@ -133,7 +142,7 @@ int main(int argc, char **argv)
         else if (!filename)
             filename = argv[i];
         else
-            help(1);
+            help(EXIT_FAILURE);
     }
 
     blob_init(&blob);
@@ -146,22 +155,28 @@ int main(int argc, char **argv)
     memset(&sigact, 0, sizeof(sigact));
     sigact.sa_handler = sighdlr;
     sigaction(SIGWINCH, &sigact, NULL);
+    sigaction(SIGALRM, &sigact, NULL);
     sigaction(SIGINT, &sigact, NULL);
 
     view_winch(&view);
     view_visual(&view);
 
     do {
+        /* This is used to redraw immediately when the window size changes. */
+        setjmp(jmp_mainloop);
+
         if (view.winch) {
             view_winch(&view);
             view.winch = false;
         }
         view_update(&view);
+
         input_get(&input, &quit);
+
     } while (!quit);
 
-    printf("\x1b[H"); /* move cursor to the top */
-    printf("\x1b[2J"); /* clrscr() */
+    cursor_line(0);
+    printf("%s", clear_screen);
     view_text(&view);
 
     input_free(&input);

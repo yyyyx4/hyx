@@ -3,33 +3,15 @@
 #include "blob.h"
 #include "view.h"
 #include "input.h"
+#include "ansi.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 
-/* FIXME collect the remaining escape codes scattered over the sources */
-char const underline_on[] = "\x1b[4m", underline_off[] = "\x1b[24m";
-char const inverse_video_on[] = "\x1b[7m", inverse_video_off[] = "\x1b[27m";
-char const clear_screen[] = "\x1b[2J";
-char const clear_line[] = "\x1b[K";
-static void cursor_line(unsigned n) { printf("\x1b[%uH", n + 1); }
-static void cursor_column(unsigned n) { printf("\x1b[%uG", n + 1); }
-char const show_cursor[] = "\x1b[?25h", hide_cursor[] = "\x1b[?25l";
-char const color_black[] = "\x1b[30m";
-char const color_red[] = "\x1b[31m";
-char const color_green[] = "\x1b[32m";
-char const color_yellow[] = "\x1b[33m";
-char const color_blue[] = "\x1b[34m";
-char const color_purple[] = "\x1b[35m";
-char const color_cyan[] = "\x1b[36m";
-char const color_white[] = "\x1b[37m";
-char const color_normal[] = "\x1b[39m";
-
 static void fprint(FILE *fp, char const *s) { fprintf(fp, "%s", s); }
 static void print(char const *s) { fprint(stdout, s); }
-
 
 static size_t view_end(struct view *view)
 {
@@ -54,7 +36,7 @@ void view_text(struct view *view)
     if (tcsetattr(fileno(stdin), TCSANOW, &view->term)) {
         /* can't pdie() because that risks infinite recursion */
         perror("tcsetattr");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -109,11 +91,15 @@ void view_winch(struct view *view)
             view->cols -= view->cols % CONFIG_ROUND_COLS;
     }
 
+    if (!view->rows || !view->cols)
+        die("window too small.");
+
     if (view->rows == old_rows && view->cols == old_cols)
         return;
 
     /* update dirtiness array */
-    view->dirty = realloc_strict(view->dirty, view->rows * sizeof(*view->dirty));
+    if ((view->dirty = realloc_strict(view->dirty, view->rows * sizeof(*view->dirty))))
+        memset(view->dirty, 0, view->rows * sizeof(*view->dirty));
     view_dirty_from(view, 0);
 
     print(clear_screen);
@@ -251,7 +237,7 @@ void view_update(struct view *view)
     }
 
     for (size_t i = view->start, l = 0; i < view_end(view); i += view->cols, ++l) {
-        /* dirtyness counter enables displaying messages until keypressed; */
+        /* dirtiness counter enables displaying messages until keypressed; */
         if (!view->dirty[l] || --view->dirty[l])
             continue;
         cursor_line(l);
@@ -281,11 +267,8 @@ void view_dirty_fromto(struct view *view, size_t from, size_t to)
     if (from < to) {
         lfrom = (from - view->start) / view->cols;
         lto = (to - view->start + view->cols - 1) / view->cols;
-        memset(
-                view->dirty + lfrom,
-                1,
-                lto - lfrom
-        );
+        for (size_t i = lfrom; i < lto; ++i)
+            view->dirty[i] = max(view->dirty[i], 1);
     }
 }
 
