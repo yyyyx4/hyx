@@ -13,7 +13,7 @@
 static void fprint(FILE *fp, char const *s) { fprintf(fp, "%s", s); }
 static void print(char const *s) { fprint(stdout, s); }
 
-static size_t view_end(struct view *view)
+static size_t view_end(struct view const *view)
 {
     return view->start + view->rows * view->cols;
 }
@@ -271,6 +271,11 @@ void view_dirty_fromto(struct view *view, size_t from, size_t to)
             view->dirty[i] = max(view->dirty[i], 1);
     }
 }
+
+static size_t satadd(size_t x, size_t y, size_t b)
+    { assert(b >= 1); return min(b - 1, x + y); }
+static size_t satsub(size_t x, size_t y, size_t a)
+    { return x < y || x - y < a ? a : x - y; }
 
 void view_adjust(struct view *view)
 {

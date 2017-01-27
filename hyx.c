@@ -2,7 +2,7 @@
  *
  * Copyright (c) 2016-2017 Lorenz Panny
  *
- * This is hyx version 0.1.2 (26 Jan 2017).
+ * This is hyx version 0.1.3 (27 Jan 2017).
  * Check for newer versions at https://home.in.tum.de/~panny.
  * Please report bugs to lorenz.panny@tum.de.
  *
@@ -66,7 +66,7 @@ static void sighdlr(int num)
 
 __attribute__((noreturn)) void version()
 {
-    printf("This is hyx version 0.1.2 (26 Jan 2017).\n");
+    printf("This is hyx version 0.1.3 (27 Jan 2017).\n");
     exit(EXIT_SUCCESS);
 }
 
@@ -169,6 +169,7 @@ int main(int argc, char **argv)
             view_winch(&view);
             view.winch = false;
         }
+        assert(input.cur >= view.start && input.cur < view.start + view.rows * view.cols);
         view_update(&view);
 
         input_get(&input, &quit);

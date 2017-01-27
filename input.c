@@ -83,7 +83,6 @@ static key get_key()
      * function again, it is likely we were interrupted by the timer.
      * Check if we've waited long enough for the rest of an escape sequence;
      * if yes, we either return the escape key or stop discarding input. */
-
     if (state == have_escape || state == discard) {
 
         if (clock_gettime(CLOCK_MONOTONIC, &cur)) pdie("clock_gettime");
@@ -190,42 +189,63 @@ static void toggle_mode_select(struct input *input)
     }
 }
 
-static size_t cur_bound(struct input *input)
+static size_t cur_bound(struct input const *input)
 {
     size_t bound = blob_length(input->view->blob);
     bound += !bound || (input->mode == INPUT && input->input_mode.insert);
+    assert(bound >= 1);
     return bound;
 }
 
-static void do_reset_hard(struct input *input)
+static size_t sat_sub_step(size_t x, size_t y, size_t z, size_t _)
 {
-    struct view *V = input->view;
-
-    do_reset_soft(input);
-    if (input->mode == SELECT)
-        toggle_mode_select(input);
-    input->input_mode.insert = false;
-    input->input_mode.ascii = false;
-    view_dirty_at(V, input->cur);
-    if (input->cur >= cur_bound(input))
-        input->cur = cur_bound(input) - 1;
-    view_dirty_at(V, input->cur);
+    (void) _; assert(z);
+    return x >= y * z ? x - y * z : x % z;
 }
 
-static void cur_move_rel(struct input *input, size_t (*f)(size_t, size_t, size_t), size_t off, size_t bound)
+static size_t sat_add_step(size_t x, size_t y, size_t z, size_t b)
 {
+    assert(z); assert(x < b);
+    return x + y * z < b ? x + y * z : b - 1 - (b - 1 - x) % z;
+}
+
+enum cur_move_direction { MOVE_LEFT, MOVE_RIGHT };
+static void cur_move_rel(struct input *input, enum cur_move_direction dir, size_t off, size_t step)
+{
+    assert(input->cur <= cur_bound(input));
+
     struct view *V = input->view;
 
     do_reset_soft(input);
     view_dirty_at(V, input->cur);
-    input->cur = f(input->cur, off, bound);
+    switch (dir) {
+    case MOVE_LEFT: input->cur = sat_sub_step(input->cur, off, step, cur_bound(input)); break;
+    case MOVE_RIGHT: input->cur = sat_add_step(input->cur, off, step, cur_bound(input)); break;
+    default: die("unexpected direction");
+    }
+    assert(input->cur < cur_bound(input));
     view_dirty_at(V, input->cur);
     view_adjust(V);
 }
 
 static void cur_adjust(struct input *input)
 {
-    cur_move_rel(input, satadd, 0, cur_bound(input));
+    struct view *V = input->view;
+
+    do_reset_soft(input);
+    if (input->cur >= cur_bound(input)) {
+        input->cur = cur_bound(input) - 1;
+        view_dirty_at(V, input->cur);
+        view_adjust(V);
+    }
+}
+
+static void do_reset_hard(struct input *input)
+{
+    if (input->mode == SELECT)
+        toggle_mode_select(input);
+    input->input_mode.insert = input->input_mode.ascii = false;
+    cur_adjust(input);
 }
 
 static void toggle_mode_insert(struct input *input)
@@ -295,21 +315,24 @@ static void do_delete(struct input *input)
         view_error(V, "can't delete: file is memory-mapped.");
         return;
     }
+    if (!blob_length(B))
+        return;
 
     switch (input->mode) {
     case INPUT:
-        if (input->cur >= blob_length(B)) {
-            cur_move_rel(input, satdec, 1, 0);
-            return;
-        }
-        input->sel = input->cur;
         input->mode = SELECT;
+        cur_adjust(input);
+        input->sel = input->cur;
         /* fall-through */
     case SELECT:
         do_reset_soft(input);
         do_yank(input);
-        blob_delete(B, min(input->sel, input->cur), absdiff(input->sel, input->cur) + 1, true);
-        cur_move_rel(input, satsub, absdiff(input->sel, input->cur), 0);
+        if (input->cur > input->sel) {
+            size_t tmp = input->cur;
+            input->cur = input->sel;
+            input->sel = tmp;
+        }
+        blob_delete(B, input->cur, input->sel - input->cur + 1, true);
         cur_adjust(input);
         view_dirty_from(V, input->cur);
         view_adjust(V);
@@ -349,6 +372,34 @@ static void do_inc_dec(struct input *input, byte diff)
     view_dirty_at(V, input->cur);
 }
 
+void do_home_end(struct input *input, size_t soft, size_t hard)
+{
+    assert(soft <= cur_bound(input));
+    assert(hard <= cur_bound(input));
+
+    struct view *V = input->view;
+
+    do_reset_soft(input);
+    view_dirty_at(V, input->cur);
+    input->cur = input->cur == soft ? hard : soft;
+    view_dirty_at(V, input->cur);
+    if (input->mode == SELECT)
+        view_dirty_from(V, 0); /* FIXME suboptimal */
+    view_adjust(V);
+}
+
+void do_pgup_pgdown(struct input *input, size_t (*f)(size_t, size_t, size_t, size_t))
+{
+    struct view *V = input->view;
+
+    do_reset_soft(input);
+    input->cur = f(input->cur, V->rows, V->cols, cur_bound(input));
+    V->start = f(V->start, V->rows, V->cols, cur_bound(input));
+    view_dirty_from(V, 0);
+    view_adjust(V);
+}
+
+
 void input_cmd(struct input *input, bool *quit);
 void input_search(struct input *input);
 
@@ -381,7 +432,7 @@ void input_get(struct input *input, bool *quit)
                 view_dirty_at(V, input->cur);
             }
 
-            cur_move_rel(input, satinc, 1, cur_bound(input));
+            cur_move_rel(input, MOVE_RIGHT, 1, 1);
             return;
         }
 
@@ -405,7 +456,7 @@ void input_get(struct input *input, bool *quit)
                     blob_replace(B, input->cur, &input->cur_val, sizeof(input->cur_val), true);
 //                    view_winch(V);
                     view_dirty_at(V, input->cur);
-                    cur_move_rel(input, satinc, 1, cur_bound(input));
+                    cur_move_rel(input, MOVE_RIGHT, 1, 1);
                     return;
                 }
             }
@@ -417,7 +468,7 @@ void input_get(struct input *input, bool *quit)
                 view_dirty_at(V, input->cur);
 
                 if (!input->low_nibble) {
-                    cur_move_rel(input, satinc, 1, cur_bound(input));
+                    cur_move_rel(input, MOVE_RIGHT, 1, 1);
                     return;
                 }
 
@@ -463,17 +514,16 @@ void input_get(struct input *input, bool *quit)
             input->cur = tmp;
         }
         do_delete(input);
-        toggle_mode_insert(input);
+        if (!input->input_mode.insert)
+            toggle_mode_insert(input);
         break;
 
     case 'p':
         do_paste(input);
         break;
 
-    case 'P': {
-            size_t tmp = do_paste(input);
-            cur_move_rel(input, satadd, tmp, cur_bound(input));
-        }
+    case 'P':
+        cur_move_rel(input, MOVE_RIGHT, do_paste(input), 1);
         break;
 
     case 'i':
@@ -540,72 +590,42 @@ void input_get(struct input *input, bool *quit)
 
     case 'j':
     case KEY_SPECIAL_DOWN:
-        cur_move_rel(input, satinc, V->cols, cur_bound(input));
+        cur_move_rel(input, MOVE_RIGHT, 1, V->cols);
         break;
 
     case 'k':
     case KEY_SPECIAL_UP:
-        cur_move_rel(input, satdec, V->cols, 0);
-        break;
-
-    case 'h':
-    case KEY_SPECIAL_LEFT:
-        cur_move_rel(input, satdec, 1, 0);
+        cur_move_rel(input, MOVE_LEFT, 1, V->cols);
         break;
 
     case 'l':
     case KEY_SPECIAL_RIGHT:
-        cur_move_rel(input, satinc, 1, cur_bound(input));
+        cur_move_rel(input, MOVE_RIGHT, 1, 1);
         break;
 
-    /* FIXME fix/unify handling of cursor movements, in particular
-     * considering the special case of an empty file */
+    case 'h':
+    case KEY_SPECIAL_LEFT:
+        cur_move_rel(input, MOVE_LEFT, 1, 1);
+        break;
+
     case 'g':
     case KEY_SPECIAL_HOME:
-        do_reset_soft(input);
-        view_dirty_at(V, input->cur);
-        input->cur = input->cur > V->start ? V->start : 0;
-        view_dirty_at(V, input->cur);
-        if (input->mode == SELECT) view_dirty_from(V, 0); /* FIXME suboptimal */
-        view_adjust(V);
+        do_home_end(input, min(V->start, cur_bound(input) - 1), 0);
         break;
 
     case 'G':
     case KEY_SPECIAL_END:
-        do_reset_soft(input);
-        view_dirty_at(V, input->cur);
-        if (input->cur < V->start + V->rows * V->cols - 1)
-            input->cur = satadd(V->start, V->rows * V->cols - 1, cur_bound(input));
-        else
-            input->cur = cur_bound(input) - 1;
-        view_dirty_at(V, input->cur);
-        if (input->mode == SELECT) view_dirty_from(V, 0); /* FIXME suboptimal */
-        view_adjust(V);
+        do_home_end(input, min(V->start + V->rows * V->cols - 1, cur_bound(input) - 1), cur_bound(input) - 1);
         break;
 
     case 0x15: /* ctrl + U */
     case KEY_SPECIAL_PGUP:
-        do_reset_soft(input);
-        if (cur_bound(input) < V->rows * V->cols) {
-            V->start = 0;
-        }
-        else {
-            input->cur = satsubstep(input->cur, V->rows, V->cols, 0);
-            V->start = satsubstep(V->start, V->rows, V->cols, 0);
-        }
-        view_dirty_from(V, 0);
-        view_adjust(V);
+        do_pgup_pgdown(input, sat_sub_step);
         break;
 
     case 0x4: /* ctrl + D */
     case KEY_SPECIAL_PGDOWN:
-        do_reset_soft(input);
-        if (cur_bound(input) < V->rows * V->cols)
-            break;
-        input->cur = sataddstep(input->cur, V->rows, V->cols, cur_bound(input));
-        V->start = sataddstep(V->start, V->rows, V->cols, satsub(cur_bound(input), (V->rows - 1) * V->cols, 0));
-        view_dirty_from(V, 0);
-        view_adjust(V);
+        do_pgup_pgdown(input, sat_add_step);
         break;
 
     case '[':
@@ -709,8 +729,7 @@ static size_t unhex(byte **ret, char const *hex)
         (*ret)[len] = unhex_digit(*p++) << 4;
         (*ret)[len++] |= unhex_digit(*p++);
     }
-    /* shrink to what we actually needed */
-    *ret = realloc_strict(*ret, len);
+    *ret = realloc_strict(*ret, len); /* shrink to what we actually used */
     return len;
 }
 
