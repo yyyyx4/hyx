@@ -21,6 +21,7 @@ static size_t view_end(struct view const *view)
 void view_init(struct view *view, struct blob *blob, struct input *input)
 {
     memset(view, 0, sizeof(*view));
+    view->pos_digits = 4; /* rather arbitrary */
     view->blob = blob;
     view->input = input;
     if (tcgetattr(fileno(stdin), &view->term))
@@ -61,7 +62,7 @@ void view_set_cols(struct view *view, bool relative, int cols)
     if (!cols) {
         if (view->cols_fixed) {
             view->cols_fixed = false;
-            view_winch(view);
+            view_recompute(view, true);
         }
         return;
     }
@@ -74,18 +75,25 @@ void view_set_cols(struct view *view, bool relative, int cols)
     }
 }
 
-void view_winch(struct view *view)
+void view_recompute(struct view *view, bool winch)
 {
     struct winsize winsz;
     unsigned old_rows = view->rows, old_cols = view->cols;
+    unsigned digs = (bit_length(max(2, blob_length(view->blob)) - 1) + 3) / 4;
+
+    if (digs > view->pos_digits) {
+        view->pos_digits = digs;
+        view_dirty_from(view, 0);
+    }
+    else if (!winch)
+        return;
 
     if (-1 == ioctl(fileno(stdout), TIOCGWINSZ, &winsz))
         pdie("ioctl");
 
     view->rows = winsz.ws_row;
     if (!view->cols_fixed) {
-        /* FIXME digits of position indicator (currently 8) should adapt to real file size */
-        view->cols = (winsz.ws_col - (8 + strlen(": ") + strlen("||"))) / strlen("xx c");
+        view->cols = (winsz.ws_col - (view->pos_digits + strlen(": ") + strlen("||"))) / strlen("xx c");
 
         if (view->cols > CONFIG_ROUND_COLS)
             view->cols -= view->cols % CONFIG_ROUND_COLS;
@@ -115,8 +123,7 @@ void view_error(struct view *view, char *msg)
     cursor_line(view->rows - 1);
     print(clear_line);
     if (view->color) print(color_red);
-    /* FIXME the width 8 is from view_winch(); see FIXME there */
-    printf("%8c  %s", ' ', msg);
+    printf("%*c  %s", view->pos_digits, ' ', msg);
     if (view->color) print(color_normal);
     fflush(stdout);
     view->dirty[view->rows - 1] = 2; /* redraw at the next keypress */
@@ -141,11 +148,11 @@ static void render_line(struct view *view, size_t off, size_t last)
     if (off <= I->cur && I->cur < off + view->cols) {
         /* cursor in current line */
         if (view->color) print(color_yellow);
-        printf("%08zx%c ", I->cur, I->input_mode.insert ? '+' : '>');
+        printf("%0*zx%c ", view->pos_digits, I->cur, I->input_mode.insert ? '+' : '>');
         if (view->color) print(color_normal);
     }
     else {
-        printf("%08zx: ", off);
+        printf("%0*zx: ", view->pos_digits, off);
     }
 
     if (I->mode == SELECT && off > sel_start && off <= sel_end)

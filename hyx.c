@@ -2,9 +2,9 @@
  *
  * Copyright (c) 2016-2017 Lorenz Panny
  *
- * This is hyx version 0.1.3 (27 Jan 2017).
- * Check for newer versions at https://home.in.tum.de/~panny.
- * Please report bugs to lorenz.panny@tum.de.
+ * This is hyx version 0.1.4 (24 May 2017).
+ * Check for newer versions at https://yx7.cc/code.
+ * Please report bugs to y@yx7.cc.
  *
  * This program is released under the MIT license; see license.txt.
  *
@@ -53,7 +53,7 @@ static void sighdlr(int num)
         view.winch = true;
         break;
     case SIGALRM:
-        /* This is required to parse escape sequences,
+        /* This is used in parsing escape sequences,
          * but we don't need to do anything here. */
         break;
     case SIGINT:
@@ -66,7 +66,7 @@ static void sighdlr(int num)
 
 __attribute__((noreturn)) void version()
 {
-    printf("This is hyx version 0.1.3 (27 Jan 2017).\n");
+    printf("This is hyx version 0.1.4 (24 May 2017).\n");
     exit(EXIT_SUCCESS);
 }
 
@@ -158,7 +158,7 @@ int main(int argc, char **argv)
     sigaction(SIGALRM, &sigact, NULL);
     sigaction(SIGINT, &sigact, NULL);
 
-    view_winch(&view);
+    view_recompute(&view, true);
     view_visual(&view);
 
     do {
@@ -166,7 +166,7 @@ int main(int argc, char **argv)
         setjmp(jmp_mainloop);
 
         if (view.winch) {
-            view_winch(&view);
+            view_recompute(&view, true);
             view.winch = false;
         }
         assert(input.cur >= view.start && input.cur < view.start + view.rows * view.cols);

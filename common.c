@@ -2,9 +2,10 @@
 #include "common.h"
 
 #include <stdlib.h>
-#include <errno.h>
-#include <sys/mman.h>
 #include <stdio.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/mman.h>
 
 unsigned long bit_length(unsigned long n)
 {
@@ -64,5 +65,13 @@ retry:
         pdie("fgets");
     }
     return ret;
+}
+
+uint64_t monotonic_microtime()
+{
+    struct timespec t;
+    if (clock_gettime(CLOCK_MONOTONIC, &t))
+        pdie("clock_gettime");
+    return (uint64_t) t.tv_sec * 1000000 + t.tv_nsec / 1000;
 }
 

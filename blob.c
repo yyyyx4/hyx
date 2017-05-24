@@ -92,14 +92,14 @@ bool blob_can_move(struct blob const *blob)
     return blob->alloc == BLOB_MALLOC;
 }
 
-bool blob_undo(struct blob *blob)
+bool blob_undo(struct blob *blob, size_t *pos)
 {
-    return history_step(&blob->undo, blob, &blob->redo);
+    return history_step(&blob->undo, blob, &blob->redo, pos);
 }
 
-bool blob_redo(struct blob *blob)
+bool blob_redo(struct blob *blob, size_t *pos)
 {
-    return history_step(&blob->redo, blob, &blob->undo);
+    return history_step(&blob->redo, blob, &blob->undo, pos);
 }
 
 void blob_yank(struct blob *blob, size_t pos, size_t len)
@@ -208,8 +208,7 @@ void blob_load(struct blob *blob, char const *filename)
     case BLOB_MMAP:
         assert(ptr);
         blob->data = ptr;
-        blob->dirty = calloc(((blob->len + 0xfff) / 0x1000 + 7) / 8, sizeof(*blob->dirty));
-        if (!blob->dirty)
+        if (!(blob->dirty = calloc(((blob->len + 0xfff) / 0x1000 + 7) / 8, sizeof(*blob->dirty))))
             pdie("calloc");
         break;
 
@@ -249,12 +248,9 @@ enum blob_save_error blob_save(struct blob *blob, char const *filename)
                     O_WRONLY | O_CREAT,
                     S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))) {
         switch (errno) {
-        case ENOENT:
-            return BLOB_SAVE_NONEXISTENT;
-        case EACCES:
-            return BLOB_SAVE_PERMISSIONS;
-        default:
-            pdie("open");
+        case ENOENT: return BLOB_SAVE_NONEXISTENT;
+        case EACCES: return BLOB_SAVE_PERMISSIONS;
+        default: pdie("open");
         }
     }
 
@@ -266,18 +262,17 @@ enum blob_save_error blob_save(struct blob *blob, char const *filename)
 
     for (size_t i = 0, n; i < blob->len; i += n) {
 
-        ptr = blob_lookup(blob, i, &n);
-
-        if (blob->dirty) {
-            if (!(blob->dirty[i / 0x1000 / 8] & (1 << i / 0x1000 % 8))) {
-                if (0 > lseek(fd, n = 0x1000 - i % 0x1000, SEEK_CUR))
-                    pdie("lseek");
-                continue;
-            }
-            n = min(0x1000, n);
+        if (blob->dirty && !(blob->dirty[i / 0x1000 / 8] & (1 << i / 0x1000 % 8))) {
+            n = 0x1000 - i % 0x1000;
+            continue;
         }
 
-        assert((ssize_t) i == lseek(fd, 0, SEEK_CUR));
+        ptr = blob_lookup(blob, i, &n);
+        if (blob->dirty)
+            n = min(0x1000 - i % 0x1000, n);
+
+        if ((ssize_t) i != lseek(fd, i, SEEK_SET))
+            pdie("lseek");
 
         if (0 >= (n = write(fd, ptr, n)))
             pdie("write");

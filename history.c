@@ -74,12 +74,15 @@ void history_save(struct diff **history, enum op_type type, struct blob *blob, s
     *history = diff;
 }
 
-bool history_step(struct diff **from, struct blob *blob, struct diff **to)
+bool history_step(struct diff **from, struct blob *blob, struct diff **to, size_t *pos)
 {
     struct diff *diff = *from;
 
     if (!diff)
         return false;
+
+    if (pos)
+        *pos = diff->pos;
 
     if (to)
         history_save(to, diff->type, blob, diff->pos, diff->len);

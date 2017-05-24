@@ -63,6 +63,7 @@ static void ungetch(int c)
 static key get_key()
 {
     static const struct itimerval timeout = {{0}, {CONFIG_WAIT_ESCAPE / 1000000, CONFIG_WAIT_ESCAPE % 1000000}};
+    static const struct itimerval stop = {0};
 
     /* FIXME Perhaps it'd be easier to just memorize everything after an escape
      * key until the timeout hits and parse it once we got the whole sequence? */
@@ -74,30 +75,28 @@ static key get_key()
         need_tilde,
     } state = none;
     static key r;
-    static struct timespec last;
+    static uint64_t tick;
 
-    struct timespec cur;
     key k;
 
     /* If we already saw an escape key and we're at the beginning of the
      * function again, it is likely we were interrupted by the timer.
      * Check if we've waited long enough for the rest of an escape sequence;
      * if yes, we either return the escape key or stop discarding input. */
-    if (state == have_escape || state == discard) {
-
-        if (clock_gettime(CLOCK_MONOTONIC, &cur)) pdie("clock_gettime");
-
-        if (CONFIG_WAIT_ESCAPE <= (cur.tv_sec - last.tv_sec) * 1000000 + (cur.tv_nsec - last.tv_nsec) / 1000) {
-            switch (state) {
-            case have_escape:
-                state = none;
-                return KEY_SPECIAL_ESCAPE;
-            case discard:
-                state = none;
-                break;
-            default:
-                die("unexpected state");
-            }
+    if ((state == have_escape || state == discard)
+            && monotonic_microtime() - tick >= CONFIG_WAIT_ESCAPE) {
+        switch (state) {
+        case have_escape:
+            state = none;
+            r = KEY_SPECIAL_ESCAPE;
+            goto stop_timer;
+        case discard:
+            state = none;
+            if (setitimer(ITIMER_REAL, &stop, NULL))
+                pdie("setitimer");
+            break;
+        default:
+            die("unexpected state");
         }
     }
 
@@ -114,11 +113,12 @@ next:
     case none:
         if (k != 0x1b)
             return k;
-        state = have_escape;
 
+        state = have_escape;
 start_timer:
-        if (clock_gettime(CLOCK_MONOTONIC, &last)) pdie("clock_gettime");
-        setitimer(ITIMER_REAL, &timeout, NULL);
+        tick = monotonic_microtime();
+        if (setitimer(ITIMER_REAL, &timeout, NULL))
+            pdie("setitimer");
         goto next;
 
     case discard:
@@ -128,17 +128,18 @@ start_timer:
         if (k != '[') {
             ungetch(k);
             state = none;
-            return KEY_SPECIAL_ESCAPE;
+            r = KEY_SPECIAL_ESCAPE;
+            goto stop_timer;
         }
         state = have_bracket;
         goto next;
 
     case have_bracket:
         switch (k) {
-        case 'A': state = none; return KEY_SPECIAL_UP;
-        case 'B': state = none; return KEY_SPECIAL_DOWN;
-        case 'C': state = none; return KEY_SPECIAL_RIGHT;
-        case 'D': state = none; return KEY_SPECIAL_LEFT;
+        case 'A': state = none; r = KEY_SPECIAL_UP; goto stop_timer;
+        case 'B': state = none; r = KEY_SPECIAL_DOWN; goto stop_timer;
+        case 'C': state = none; r = KEY_SPECIAL_RIGHT; goto stop_timer;
+        case 'D': state = none; r = KEY_SPECIAL_LEFT; goto stop_timer;
         case '3': state = need_tilde; r = KEY_SPECIAL_DELETE; goto next;
         case '5': state = need_tilde; r = KEY_SPECIAL_PGUP; goto next;
         case '6': state = need_tilde; r = KEY_SPECIAL_PGDOWN; goto next;
@@ -156,6 +157,8 @@ discard_sequence:
         if (k != '~')
             goto discard_sequence;
         state = none;
+stop_timer:
+        setitimer(ITIMER_REAL, &stop, NULL);
         return r;
     }
 
@@ -298,6 +301,7 @@ static size_t do_paste(struct input *input)
     view_adjust(input->view);
     do_reset_soft(input);
     retval = blob_paste(B, input->cur, input->input_mode.insert ? INSERT : REPLACE);
+    view_recompute(V, false);
     if (input->input_mode.insert)
         view_dirty_from(input->view, input->cur);
     else
@@ -306,17 +310,21 @@ static size_t do_paste(struct input *input)
     return retval;
 }
 
-static void do_delete(struct input *input)
+static bool do_delete(struct input *input, bool back)
 {
     struct view *V = input->view;
     struct blob *B = V->blob;
 
     if (!blob_can_move(B)) {
         view_error(V, "can't delete: file is memory-mapped.");
-        return;
+        return false;
     }
     if (!blob_length(B))
-        return;
+        return false;
+
+    if (back && !input->cur)
+        return false;
+    cur_move_rel(input, MOVE_LEFT, 1, 1);
 
     switch (input->mode) {
     case INPUT:
@@ -333,10 +341,12 @@ static void do_delete(struct input *input)
             input->sel = tmp;
         }
         blob_delete(B, input->cur, input->sel - input->cur + 1, true);
+        view_recompute(V, false);
         cur_adjust(input);
         view_dirty_from(V, input->cur);
         view_adjust(V);
     }
+    return true;
 }
 
 static void do_search_cont(struct input *input, ssize_t dir)
@@ -425,6 +435,7 @@ void input_get(struct input *input, bool *quit)
             b = k;
             if (input->input_mode.insert) {
                 blob_insert(B, input->cur, &b, sizeof(b), true);
+                view_recompute(V, false);
                 view_dirty_from(V, input->cur);
             }
             else {
@@ -449,12 +460,11 @@ void input_get(struct input *input, bool *quit)
                 input->cur_val |= (k > '9' ? k - 'a' + 10 : k - '0') << 4 * (input->low_nibble = !input->low_nibble);
                 if (input->low_nibble) {
                     blob_insert(B, input->cur, &input->cur_val, sizeof(input->cur_val), true);
-//                    view_winch(V);
+                    view_recompute(V, false);
                     view_dirty_from(V, input->cur);
                 }
                 else {
                     blob_replace(B, input->cur, &input->cur_val, sizeof(input->cur_val), true);
-//                    view_winch(V);
                     view_dirty_at(V, input->cur);
                     cur_move_rel(input, MOVE_RIGHT, 1, 1);
                     return;
@@ -488,9 +498,13 @@ void input_get(struct input *input, bool *quit)
         do_reset_hard(input);
         break;
 
+    case 0x7f: /* backspace */
+        do_delete(input, true);
+        break;
+
     case 'x':
     case KEY_SPECIAL_DELETE:
-        do_delete(input);
+        do_delete(input, false);
         break;
 
     case 'q':
@@ -513,8 +527,7 @@ void input_get(struct input *input, bool *quit)
             input->sel = input->cur;
             input->cur = tmp;
         }
-        do_delete(input);
-        if (!input->input_mode.insert)
+        if (do_delete(input, false) && !input->input_mode.insert)
             toggle_mode_insert(input);
         break;
 
@@ -536,17 +549,21 @@ void input_get(struct input *input, bool *quit)
 
     case 'u':
         if (input->mode != INPUT) break;
-        if (!blob_undo(B))
+        if (!blob_undo(B, &input->cur))
             break;
+        view_recompute(V, false);
         cur_adjust(input);
+        view_adjust(V);
         view_dirty_from(V, 0); /* FIXME suboptimal */
         break;
 
     case 0x12: /* ctrl + R */
         if (input->mode != INPUT) break;
-        if (!blob_redo(B))
+        if (!blob_redo(B, &input->cur))
             break;
+        view_recompute(V, false);
         cur_adjust(input);
+        view_adjust(V);
         view_dirty_from(V, 0); /* FIXME suboptimal */
         break;
 

@@ -7,10 +7,9 @@
 #include <sys/ioctl.h>
 
 struct input;
-
 struct view {
     struct blob *blob;
-    struct input *input;
+    struct input *input; /* FIXME hack */
 
     size_t start;
 
@@ -19,6 +18,7 @@ struct view {
 
     bool cols_fixed;
     unsigned rows, cols;
+    unsigned pos_digits;
     bool color;
     bool winch;
 
@@ -28,7 +28,7 @@ struct view {
 void view_init(struct view *view, struct blob *blob, struct input *input);
 void view_text(struct view *view);
 void view_visual(struct view *view);
-void view_winch(struct view *view);
+void view_recompute(struct view *view, bool winch);
 void view_set_cols(struct view *view, bool relative, int cols);
 void view_free(struct view *view);
 

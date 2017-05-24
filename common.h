@@ -45,4 +45,6 @@ off_t lseek_strict(int fildes, off_t offset, int whence);
 
 char *fgets_retry(char *s, int size, FILE *stream);
 
+uint64_t monotonic_microtime();
+
 #endif

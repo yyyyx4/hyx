@@ -35,8 +35,8 @@ void blob_free(struct blob *blob);
 
 bool blob_can_move(struct blob const *blob);
 
-bool blob_undo(struct blob *blob);
-bool blob_redo(struct blob *blob);
+bool blob_undo(struct blob *blob, size_t *pos);
+bool blob_redo(struct blob *blob, size_t *pos);
 
 void blob_yank(struct blob *blob, size_t pos, size_t len);
 size_t blob_paste(struct blob *blob, size_t pos, enum op_type type);
