@@ -322,9 +322,11 @@ static bool do_delete(struct input *input, bool back)
     if (!blob_length(B))
         return false;
 
-    if (back && !input->cur)
-        return false;
-    cur_move_rel(input, MOVE_LEFT, 1, 1);
+    if (back) {
+        if (!input->cur)
+            return false;
+        cur_move_rel(input, MOVE_LEFT, 1, 1);
+    }
 
     switch (input->mode) {
     case INPUT:
@@ -349,12 +351,21 @@ static bool do_delete(struct input *input, bool back)
     return true;
 }
 
+static void do_quit(struct input *input, bool *quit, bool force)
+{
+    struct view *V = input->view;
+    if (force || blob_is_saved(V->blob))
+        *quit = true;
+    else
+        view_error(V, "unsaved changes! use :q! if you are sure.");
+}
+
 static void do_search_cont(struct input *input, ssize_t dir)
 {
     struct view *V = input->view;
     struct blob *B = V->blob;
     ssize_t pos = blob_search(B, input->search.needle, input->search.len,
-            (input->cur + blob_length(B) + dir) % blob_length(B), -1, dir);
+            (input->cur + blob_length(B) + dir) % blob_length(B), dir);
 
     if (pos < 0)
         return;
@@ -508,9 +519,7 @@ void input_get(struct input *input, bool *quit)
         break;
 
     case 'q':
-        /* FIXME implement this warning */
-//        view_error(input->view, "unsaved changes! please use :q if you are sure.");
-        *quit = true;
+        do_quit(input, quit, false);
         break;
 
     case 'v':
@@ -673,7 +682,7 @@ void input_cmd(struct input *input, bool *quit)
         switch (blob_save(input->view->blob, strtok(NULL, " "))) {
         case BLOB_SAVE_OK:
             if (!strcmp(p, "wq"))
-                *quit = true;
+                do_quit(input, quit, false);
             break;
         case BLOB_SAVE_FILENAME:
             view_error(input->view, "can't save: no filename.");
@@ -684,12 +693,15 @@ void input_cmd(struct input *input, bool *quit)
         case BLOB_SAVE_PERMISSIONS:
             view_error(input->view, "can't save: insufficient permissions.");
             break;
+        case BLOB_SAVE_BUSY:
+            view_error(input->view, "can't save: file is busy.");
+            break;
         default:
             die("can't save: unknown error");
         }
     }
-    else if (!strcmp(p, "q")) {
-        *quit = true;
+    else if (!strcmp(p, "q") || !strcmp(p, "q!")) {
+        do_quit(input, quit, !strcmp(p, "q!"));
     }
     else if (!strcmp(p, "color")) {
         if ((p = strtok(NULL, " ")))

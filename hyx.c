@@ -1,8 +1,8 @@
 /*
  *
- * Copyright (c) 2016-2017 Lorenz Panny
+ * Copyright (c) 2016-2018 Lorenz Panny
  *
- * This is hyx version 0.1.4 (24 May 2017).
+ * This is hyx version 0.1.5 (01 June 2018).
  * Check for newer versions at https://yx7.cc/code.
  * Please report bugs to y@yx7.cc.
  *
@@ -66,7 +66,7 @@ static void sighdlr(int num)
 
 __attribute__((noreturn)) void version()
 {
-    printf("This is hyx version 0.1.4 (24 May 2017).\n");
+    printf("This is hyx version 0.1.5 (01 June 2018).\n");
     exit(EXIT_SUCCESS);
 }
 
@@ -87,8 +87,8 @@ __attribute__((noreturn)) void help(int st)
     printf("q               quit\n");
     printf("\n");
     printf("h, j, k, l      move cursor\n");
-    printf("(hex digits)    edit bytes in hex mode\n");
-    printf("(printable)     edit bytes in ascii mode\n");
+    printf("(hex digits)    edit bytes (in hex mode)\n");
+    printf("(printable)     edit bytes (in ascii mode)\n");
     printf("i               switch between replace and insert modes\n");
     printf("tab             switch between hex and ascii input\n");
     printf("\n");
@@ -109,8 +109,10 @@ __attribute__((noreturn)) void help(int st)
     printf("g, G            jump to start/end of screen or file\n");
     printf("\n");
     printf(":               enter command (see below)\n");
+    printf("\n");
     printf("/x (hex string) search for hexadecimal bytes\n");
     printf("/s (characters) search for ascii string\n");
+    printf("n, N            jump to next/previous match\n");
     printf("\n");
     printf("ctrl+a, ctrl+x  increment/decrement current byte\n");
     printf("\n");

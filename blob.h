@@ -20,6 +20,7 @@ struct blob {
     uint8_t *dirty;
 
     struct diff *undo, *redo;
+    ssize_t saved_dist;
 
     struct {
         size_t len;
@@ -41,7 +42,7 @@ bool blob_redo(struct blob *blob, size_t *pos);
 void blob_yank(struct blob *blob, size_t pos, size_t len);
 size_t blob_paste(struct blob *blob, size_t pos, enum op_type type);
 
-ssize_t blob_search(struct blob *blob, byte const *needle, size_t len, size_t start, ssize_t end, ssize_t dir);
+ssize_t blob_search(struct blob *blob, byte const *needle, size_t len, size_t start, ssize_t dir);
 
 void blob_load(struct blob *blob, char const *filename);
 enum blob_save_error {
@@ -49,7 +50,9 @@ enum blob_save_error {
     BLOB_SAVE_FILENAME,
     BLOB_SAVE_NONEXISTENT,
     BLOB_SAVE_PERMISSIONS,
+    BLOB_SAVE_BUSY,
 } blob_save(struct blob *blob, char const *filename);
+bool blob_is_saved(struct blob const *blob);
 
 static inline size_t blob_length(struct blob const *blob)
     { return blob->len; }

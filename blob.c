@@ -24,6 +24,7 @@ void blob_replace(struct blob *blob, size_t pos, byte const *data, size_t len, b
     if (save_history) {
         history_free(&blob->redo);
         history_save(&blob->undo, REPLACE, blob, pos, len);
+        ++blob->saved_dist;
     }
 
     if (blob->dirty)
@@ -43,6 +44,7 @@ void blob_insert(struct blob *blob, size_t pos, byte const *data, size_t len, bo
     if (save_history) {
         history_free(&blob->redo);
         history_save(&blob->undo, INSERT, blob, pos, len);
+        ++blob->saved_dist;
     }
 
     blob->data = realloc_strict(blob->data, blob->len += len);
@@ -61,6 +63,7 @@ void blob_delete(struct blob *blob, size_t pos, size_t len, bool save_history)
     if (save_history) {
         history_free(&blob->redo);
         history_save(&blob->undo, DELETE, blob, pos, len);
+        ++blob->saved_dist;
     }
 
     memmove(blob->data + pos, blob->data + pos + len, (blob->len -= len) - pos);
@@ -94,12 +97,16 @@ bool blob_can_move(struct blob const *blob)
 
 bool blob_undo(struct blob *blob, size_t *pos)
 {
-    return history_step(&blob->undo, blob, &blob->redo, pos);
+    bool r = history_step(&blob->undo, blob, &blob->redo, pos);
+    blob->saved_dist -= r;
+    return r;
 }
 
 bool blob_redo(struct blob *blob, size_t *pos)
 {
-    return history_step(&blob->redo, blob, &blob->undo, pos);
+    bool r = history_step(&blob->redo, blob, &blob->undo, pos);
+    blob->saved_dist += r;
+    return r;
 }
 
 void blob_yank(struct blob *blob, size_t pos, size_t len)
@@ -131,35 +138,52 @@ size_t blob_paste(struct blob *blob, size_t pos, enum op_type type)
     return blob->clipboard.len;
 }
 
-ssize_t blob_search(struct blob *blob, byte const *needle, size_t len, size_t start, ssize_t end, ssize_t dir)
+/* modified Boyer-Moore-Horspool algorithm. */
+ssize_t blob_search(struct blob *blob, byte const *needle, size_t len, size_t start, ssize_t dir)
 {
-    if (!blob_length(blob) || !len)
+    size_t blen = blob_length(blob);
+
+    if (!len || len > blen)
         return -1;
 
-    assert(start < blob_length(blob));
-    assert(end < 0 || (size_t) end < blob_length(blob));
-    assert((size_t) labs(dir) == 1);
+    assert(start < blen);
+    assert(dir == -1 || dir == +1);
+
+    /* preprocessing inlined for simplicity; patterns are usually short */
+    size_t tab[256];
+    for (size_t j = 0; j < 256; ++j)
+        tab[j] = len;
+    for (size_t j = 0; j < len - 1; ++j)
+        tab[needle[dir > 0 ? j : len - 1 - j]] = len - 1 - j;
 
     for (size_t i = start; ; ) {
 
-        if (end >= 0 && i == (size_t) end)
-            break;
-
-        if (i + len <= blob_length(blob)) {
-            /* FIXME use a real search algorithm */
-            bool found = true;
-            for (size_t j = 0; found && j < len; ++j)
-                found = blob_at(blob, i + j) == needle[j];
-            if (found)
-                return i;
+        if (i + len > blen) {
+            i = (i + blen + dir) % blen;
+            continue;
         }
 
-        if (start == (i = (i + blob_length(blob) + dir) % blob_length(blob)))
+        bool found = true;
+        for (ssize_t j = dir > 0 ? len - 1 : 0; found && j >= 0 && (size_t) j < len; j -= dir)
+            found = blob_at(blob, i + j) == needle[j];
+        if (found)
+            return i;
+
+        ssize_t ii = i + dir * tab[blob_at(blob, i + (dir > 0 ? len - 1 : 0))];
+        if (ii < 0 || (size_t) ii >= blen) {
+            i = ii < 0 ? blen - 1 : 0;
+            continue;
+        }
+        if (dir > 0 && i < start && (size_t) ii >= start)
             break;
+        if (dir < 0 && i > start && ii <= (ssize_t) start)
+            break;
+        i = (ii % blen + blen) % blen;
     }
 
     return -1;
 }
+
 
 void blob_load(struct blob *blob, char const *filename)
 {
@@ -226,6 +250,8 @@ void blob_load(struct blob *blob, char const *filename)
 
     if (close(fd))
         pdie("close");
+
+    blob->saved_dist = 0;
 }
 
 enum blob_save_error blob_save(struct blob *blob, char const *filename)
@@ -248,8 +274,9 @@ enum blob_save_error blob_save(struct blob *blob, char const *filename)
                     O_WRONLY | O_CREAT,
                     S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))) {
         switch (errno) {
-        case ENOENT: return BLOB_SAVE_NONEXISTENT;
-        case EACCES: return BLOB_SAVE_PERMISSIONS;
+        case ENOENT:  return BLOB_SAVE_NONEXISTENT;
+        case EACCES:  return BLOB_SAVE_PERMISSIONS;
+        case ETXTBSY: return BLOB_SAVE_BUSY;
         default: pdie("open");
         }
     }
@@ -281,7 +308,14 @@ enum blob_save_error blob_save(struct blob *blob, char const *filename)
     if (close(fd))
         pdie("close");
 
+    blob->saved_dist = 0;
+
     return BLOB_SAVE_OK;
+}
+
+bool blob_is_saved(struct blob const *blob)
+{
+    return !blob->saved_dist;
 }
 
 byte const *blob_lookup(struct blob const *blob, size_t pos, size_t *len)
