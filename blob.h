@@ -45,6 +45,7 @@ size_t blob_paste(struct blob *blob, size_t pos, enum op_type type);
 ssize_t blob_search(struct blob *blob, byte const *needle, size_t len, size_t start, ssize_t dir);
 
 void blob_load(struct blob *blob, char const *filename);
+void blob_load_stream(struct blob *blob, FILE *fp);
 enum blob_save_error {
     BLOB_SAVE_OK = 0,
     BLOB_SAVE_FILENAME,

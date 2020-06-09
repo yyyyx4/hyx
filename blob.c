@@ -185,6 +185,8 @@ ssize_t blob_search(struct blob *blob, byte const *needle, size_t len, size_t st
 }
 
 
+/* blob_load* functions must be called with a fresh struct from blob_init() */
+
 void blob_load(struct blob *blob, char const *filename)
 {
     struct stat st;
@@ -250,8 +252,27 @@ void blob_load(struct blob *blob, char const *filename)
 
     if (close(fd))
         pdie("close");
+}
 
-    blob->saved_dist = 0;
+void blob_load_stream(struct blob *blob, FILE *fp)
+{
+    const size_t alloc_size = 0x1000;
+    size_t n = 0;
+
+    while (true) {
+        assert(n <= blob->len);
+
+        if (blob->len - n < alloc_size)
+            blob->data = realloc_strict(blob->data, (blob->len += alloc_size));
+
+        size_t r = fread(blob->data + n, 1, blob->len - n, fp);
+        if (!r) {
+            if (feof(fp)) break;
+            pdie("could not read data from stream");
+        }
+        n += r;
+    }
+    blob->data = realloc(blob->data, (blob->len = n));
 }
 
 enum blob_save_error blob_save(struct blob *blob, char const *filename)

@@ -3,6 +3,7 @@
 
 /* ANSI terminal escape sequences. */
 
+static char const bold_on[] = "\x1b[1m", bold_off[] = "\x1b[22m"; /* not a typo */
 static char const underline_on[] = "\x1b[4m", underline_off[] = "\x1b[24m";
 static char const inverse_video_on[] = "\x1b[7m", inverse_video_off[] = "\x1b[27m";
 static char const clear_screen[] = "\x1b[2J";

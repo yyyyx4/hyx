@@ -237,6 +237,7 @@ static void cur_adjust(struct input *input)
 
     do_reset_soft(input);
     if (input->cur >= cur_bound(input)) {
+        view_dirty_at(V, input->cur);
         input->cur = cur_bound(input) - 1;
         view_dirty_at(V, input->cur);
         view_adjust(V);

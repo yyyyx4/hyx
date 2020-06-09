@@ -1,8 +1,8 @@
 /*
  *
- * Copyright (c) 2016-2018 Lorenz Panny
+ * Copyright (c) 2016-2020 Lorenz Panny
  *
- * This is hyx version 0.1.5 (01 June 2018).
+ * This is hyx version 2020.06.09.
  * Check for newer versions at https://yx7.cc/code.
  * Please report bugs to y@yx7.cc.
  *
@@ -66,7 +66,7 @@ static void sighdlr(int num)
 
 __attribute__((noreturn)) void version()
 {
-    printf("This is hyx version 0.1.5 (01 June 2018).\n");
+    printf("This is hyx version 2020.06.09.\n");
     exit(EXIT_SUCCESS);
 }
 
@@ -79,7 +79,10 @@ __attribute__((noreturn)) void help(int st)
             tty ? color_green : "", tty ? color_normal : "");
     printf("    ------------------------------\n\n");
 
-    printf("    %sinvocation:%s hyx [$filename]\n\n",
+    printf("    %sinvocation:%s hyx [filename]\n",
+            tty ? color_yellow : "", tty ? color_normal : "");
+
+    printf("    %sinvocation:%s [command] | hyx\n\n",
             tty ? color_yellow : "", tty ? color_normal : "");
 
     printf("    %skeys:%s\n\n",
@@ -148,9 +151,17 @@ int main(int argc, char **argv)
     }
 
     blob_init(&blob);
+    if (!isatty(fileno(stdin))) {
+        if (filename) help(EXIT_FAILURE);
+        blob_load_stream(&blob, stdin);
+        if (!freopen("/dev/tty", "r", stdin))
+            pdie("could not reopen controlling TTY");
+    }
+    else {
+        blob_load(&blob, filename);
+    }
+
     view_init(&view, &blob, &input);
-    blob_load(&blob, filename);
-    view.color = true;
     input_init(&input, &view);
 
     /* set up signal handler */

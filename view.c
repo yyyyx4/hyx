@@ -21,9 +21,10 @@ static size_t view_end(struct view const *view)
 void view_init(struct view *view, struct blob *blob, struct input *input)
 {
     memset(view, 0, sizeof(*view));
-    view->pos_digits = 4; /* rather arbitrary */
     view->blob = blob;
     view->input = input;
+    view->pos_digits = 4; /* rather arbitrary */
+    view->color = true;
     if (tcgetattr(fileno(stdin), &view->term))
         pdie("tcgetattr");
 }
@@ -110,6 +111,8 @@ void view_recompute(struct view *view, bool winch)
         memset(view->dirty, 0, view->rows * sizeof(*view->dirty));
     view_dirty_from(view, 0);
 
+    view_adjust(view);
+
     print(clear_screen);
 }
 
@@ -184,18 +187,22 @@ static void render_line(struct view *view, size_t off, size_t last)
                 fprint(fp, inverse_video_on);
             );
 
-            if (I->mode == INPUT && !I->input_mode.ascii) {
-                if (!I->low_nibble) print(underline_on);
-                putchar(digits[0]);
-                print(I->low_nibble ? underline_on : underline_off);
-                putchar(digits[1]);
-                if (I->low_nibble) print(underline_off);
+            if (!I->input_mode.ascii) {
+                print(bold_on);
+                if (I->mode == INPUT) {
+                    if (!I->low_nibble) print(underline_on);
+                    putchar(digits[0]);
+                    print(I->low_nibble ? underline_on : underline_off);
+                    putchar(digits[1]);
+                    if (I->low_nibble) print(underline_off);
+                }
+                print(bold_off);
             }
             else
                 printf("%s", digits);
 
             if (I->mode == INPUT && I->input_mode.ascii)
-                fprintf(asciifp, "%s%c%s", underline_on, isprint(b) ? b : '.', underline_off);
+                fprintf(asciifp, "%s%s%c%s%s", bold_on, underline_on, isprint(b) ? b : '.', underline_off, bold_off);
             else
                 fputc(isprint(b) ? b : '.', asciifp);
 
