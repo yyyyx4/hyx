@@ -2,9 +2,13 @@
  *
  * Copyright (c) 2016-2020 Lorenz Panny
  *
- * This is hyx version 2020.06.09.
+ * This is hyx version 2020.12.24.
  * Check for newer versions at https://yx7.cc/code.
  * Please report bugs to y@yx7.cc.
+ *
+ * Contributors:
+ *     2018, anonymous          Faster search algorithm.
+ *     2020, Leah Neukirchen    Suspend on ^Z. File information on ^G.
  *
  * This program is released under the MIT license; see license.txt.
  *
@@ -52,6 +56,12 @@ static void sighdlr(int num)
     case SIGWINCH:
         view.winch = true;
         break;
+    case SIGTSTP:
+	view.tstp = true;
+	break;
+    case SIGCONT:
+	view.cont = true;
+	break;
     case SIGALRM:
         /* This is used in parsing escape sequences,
          * but we don't need to do anything here. */
@@ -66,7 +76,7 @@ static void sighdlr(int num)
 
 __attribute__((noreturn)) void version()
 {
-    printf("This is hyx version 2020.06.09.\n");
+    printf("This is hyx version 2020.12.24.\n");
     exit(EXIT_SUCCESS);
 }
 
@@ -106,10 +116,11 @@ __attribute__((noreturn)) void help(int st)
     printf("p               paste\n");
     printf("P               paste and move cursor\n");
     printf("\n");
-    printf("], [            increment/decrement number of columns\n");
+    printf("], [            increase/decrease number of columns\n");
     printf("\n");
     printf("ctrl+u, ctrl+d  scroll up/down one page\n");
     printf("g, G            jump to start/end of screen or file\n");
+    printf("^, $            jump to start/end of current line\n");
     printf("\n");
     printf(":               enter command (see below)\n");
     printf("\n");
@@ -118,6 +129,9 @@ __attribute__((noreturn)) void help(int st)
     printf("n, N            jump to next/previous match\n");
     printf("\n");
     printf("ctrl+a, ctrl+x  increment/decrement current byte\n");
+    printf("\n");
+    printf("ctrl+g          show file name and current position\n");
+    printf("ctrl+z          suspend editor; use \"fg\" to continue\n");
     printf("\n");
 
     printf("    %scommands:%s\n\n",
@@ -168,6 +182,8 @@ int main(int argc, char **argv)
     memset(&sigact, 0, sizeof(sigact));
     sigact.sa_handler = sighdlr;
     sigaction(SIGWINCH, &sigact, NULL);
+    sigaction(SIGTSTP, &sigact, NULL);
+    sigaction(SIGCONT, &sigact, NULL);
     sigaction(SIGALRM, &sigact, NULL);
     sigaction(SIGINT, &sigact, NULL);
 
@@ -181,6 +197,19 @@ int main(int argc, char **argv)
         if (view.winch) {
             view_recompute(&view, true);
             view.winch = false;
+        }
+        if (view.tstp) {
+            view_text(&view);
+            fflush(stdout);
+            view.tstp = false;
+            raise(SIGSTOP);
+            /* should continue with view.cont == true */
+        }
+        if (view.cont) {
+            view_recompute(&view, true);
+            view_dirty_from(&view, 0);
+            view_visual(&view);
+            view.cont = false;
         }
         assert(input.cur >= view.start && input.cur < view.start + view.rows * view.cols);
         view_update(&view);

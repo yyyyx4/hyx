@@ -327,6 +327,8 @@ static bool do_delete(struct input *input, bool back)
         if (!input->cur)
             return false;
         cur_move_rel(input, MOVE_LEFT, 1, 1);
+        if (!input->input_mode.insert)
+            return true;
     }
 
     switch (input->mode) {
@@ -364,9 +366,13 @@ static void do_quit(struct input *input, bool *quit, bool force)
 static void do_search_cont(struct input *input, ssize_t dir)
 {
     struct view *V = input->view;
-    struct blob *B = V->blob;
-    ssize_t pos = blob_search(B, input->search.needle, input->search.len,
-            (input->cur + blob_length(B) + dir) % blob_length(B), dir);
+    size_t blen = blob_length(V->blob);
+
+    if (!blen)
+        return;
+
+    size_t cur = dir > 0 ? min(input->cur, blen-1) : input->cur;
+    ssize_t pos = blob_search(V->blob, input->search.needle, input->search.len, (cur + blen + dir) % blen, dir);
 
     if (pos < 0)
         return;
@@ -382,7 +388,7 @@ static void do_inc_dec(struct input *input, byte diff)
     struct view *V = input->view;
     struct blob *B = V->blob;
 
-    /* FIXME should we do anything for selections? */
+    /* should we do anything for selections? */
     if (input->mode != INPUT)
         return;
 
@@ -577,6 +583,20 @@ void input_get(struct input *input, bool *quit)
         view_dirty_from(V, 0); /* FIXME suboptimal */
         break;
 
+    case 0x7: /* ctrl + G */
+        {
+             char buf[256];
+             snprintf(buf, sizeof(buf), "\"%s\" %s%s %zd/%zd bytes --%zd%%--",
+                 input->view->blob->filename,
+                 input->view->blob->alloc == BLOB_MMAP ? "[mmap]" : "",
+                 input->view->blob->saved_dist ? "[modified]" : "[saved]",
+                 input->cur,
+                 blob_length(input->view->blob),
+                 ((input->cur+1) * 100) / blob_length(input->view->blob));
+             view_message(V, buf, NULL);
+        }
+        break;
+
     case 0xc: /* ctrl + L */
         view_dirty_from(V, 0);
         break;
@@ -600,7 +620,7 @@ void input_get(struct input *input, bool *quit)
         break;
 
     case 'n':
-        do_search_cont(input, 1);
+        do_search_cont(input, +1);
         break;
 
     case 'N':
@@ -633,6 +653,14 @@ void input_get(struct input *input, bool *quit)
     case 'h':
     case KEY_SPECIAL_LEFT:
         cur_move_rel(input, MOVE_LEFT, 1, 1);
+        break;
+
+    case '^':
+        cur_move_rel(input, MOVE_LEFT, (input->cur - V->start) % V->cols, 1);
+        break;
+
+    case '$':
+        cur_move_rel(input, MOVE_RIGHT, V->cols-1 - (input->cur - V->start) % V->cols, 1);
         break;
 
     case 'g':
@@ -788,7 +816,7 @@ void input_search(struct input *input)
         input->search.len = unhex(&input->search.needle, q);
     }
     else if (!strcmp(p, "s")) {
-        if (!(q = strtok(NULL, " ")))
+        if (!(q = strtok(NULL, "")))
             q = p;
 str:
         input->search.len = strlen(q);
@@ -799,6 +827,6 @@ str:
         goto str;
     }
 
-    do_search_cont(input, 1);
+    do_search_cont(input, +1);
 }
 
